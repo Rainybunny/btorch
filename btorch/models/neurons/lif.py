@@ -6,11 +6,11 @@ from jaxtyping import Float
 from spikingjelly.activation_based import surrogate
 from torch import Tensor
 
-from . import environ
-from .base import BaseNode
-from .ode import euler_step, exp_euler_step_auto
-from .scale import SupportScaleState
-from .types import TensorLike
+from .. import environ
+from ..base import BaseNode
+from ..ode import euler_step, exp_euler_step_auto
+from ..scale import SupportScaleState
+from ..types import TensorLike
 
 
 class LIF(BaseNode, SupportScaleState):

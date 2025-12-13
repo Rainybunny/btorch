@@ -6,11 +6,11 @@ from . import (
     functional,
     glif,
     init,
-    lif,
     linear,
     ode,
     rnn,
 )
+from .neurons import alif, lif
 
 
 __all__ = [
@@ -20,6 +20,7 @@ __all__ = [
     "environ",
     "functional",
     "glif",
+    "alif",
     "lif",
     "init",
     "linear",
