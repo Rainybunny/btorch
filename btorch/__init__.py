@@ -1,12 +1,11 @@
 """Public package entrypoint for Btorch."""
 
-from . import connectome, datasets, models, utils  # noqa: I001
+from btorch import config, jit
+
 
 __all__ = [
     "__version__",
-    "connectome",
-    "datasets",
-    "models",
-    "utils",
+    "config",
+    "jit",
 ]
 __version__ = "0.0.0.1"

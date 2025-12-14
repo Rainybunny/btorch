@@ -1,8 +1,10 @@
 import torch
 
+from btorch import jit
 
-_heaviside = torch.jit.script(lambda x: (x >= 0).to(x))
-_damp = torch.jit.script(lambda g, d: g * d)
+
+_heaviside = jit.script(lambda x: (x >= 0).to(x))
+_damp = jit.script(lambda g, d: g * d)
 
 
 class _SurrogateAutograd(torch.autograd.Function):

@@ -2,13 +2,13 @@ import math
 
 import torch
 
+from btorch import jit
+
 from .base import SurrogateFunctionBase
 
 
-_atan_primitive = torch.jit.script(
-    lambda x, alpha: 0.5 + torch.atan(alpha * x) / math.pi
-)
-_atan_derivative = torch.jit.script(lambda x, alpha: alpha / (1 + (alpha * x) ** 2))
+_atan_primitive = jit.script(lambda x, alpha: 0.5 + torch.atan(alpha * x) / math.pi)
+_atan_derivative = jit.script(lambda x, alpha: alpha / (1 + (alpha * x) ** 2))
 
 
 class ATan(SurrogateFunctionBase):

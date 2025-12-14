@@ -2,14 +2,16 @@ import math
 
 import torch
 
+from btorch import jit
+
 from .base import SurrogateFunctionBase
 
 
-_erf_primitive = torch.jit.script(
+_erf_primitive = jit.script(
     lambda x, alpha, variance: 0.5
     * (1 + torch.erf(alpha * x / math.sqrt(2 * variance)))
 )
-_erf_derivative = torch.jit.script(
+_erf_derivative = jit.script(
     lambda x, alpha, variance: (alpha / math.sqrt(2 * math.pi * variance))
     * torch.exp(-0.5 * (alpha * x) ** 2 / variance)
 )
