@@ -331,6 +331,10 @@ class MemoryModule(base.MemoryModule):
             self.set_reset_value(k, v, strict=False)
 
 
+# TODO: pre_spike_v should be merged with v to avoid double memory consumption
+# TODO: ODE integration method should be configurable
+
+
 class BaseNode(MemoryModule):
     v: torch.Tensor
     v_pre_spike: torch.Tensor
