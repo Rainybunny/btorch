@@ -194,24 +194,8 @@ class RecurrentNNAbstract(base.MemoryModule):
             {k: torch.stack(v, dim=0) for k, v in all_states_lists.items()},
         )
 
-    def get_grad_history(
-        self, state_name: str | None = None
-    ) -> dict[str, list[Tensor]] | list[Tensor]:
-        """Retrieve saved gradient history.
-
-        Parameters
-        ----------
-        state_name : str | None
-            If provided, returns gradients for that specific state.
-            If None, returns all gradient histories as a dict.
-
-        Returns
-        -------
-        dict[str, list[Tensor]] | list[Tensor]
-            Gradient history for requested state(s).
-        """
-        if state_name is not None:
-            return self._grad_history.get(state_name, [])
+    def get_grad_history(self) -> dict[str, list]:
+        """Retrieve saved gradient history."""
         return self._grad_history
 
     def clear_grad_history(self):
