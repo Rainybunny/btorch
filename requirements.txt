@@ -8,3 +8,6 @@ spikingjelly
 omegaconf
 hdf5plugin
 plotly
+# dynamic tools
+nolds
+powerlaw
