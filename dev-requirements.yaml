@@ -9,6 +9,9 @@ dependencies:
   - pip:
     # profiling
     - tensorboard_plugin_profile
+    # dynamic tools
+    - nolds
+    - powerlaw
   - tqdm
   - matplotlib
   - scipy

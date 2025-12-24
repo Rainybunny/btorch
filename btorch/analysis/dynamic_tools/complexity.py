@@ -13,8 +13,9 @@ def calculate_ra(spike_initial: torch.Tensor, spike_final: torch.Tensor) -> floa
     RA = Trace(G_final * G_initial) / (||G_final|| * ||G_initial||)
     where G = S * S^T (Gram matrix of spike activity)
 
-    If inputs are 3D tensors, they are assumed to be (batch_size, time_steps, num_neurons)
-    and will be averaged over the time dimension (dim=1) to obtain firing rates.
+    If inputs are 3D tensors, they are assumed to be (batch_size, time_steps,
+    num_neurons) and will be averaged over the time dimension (dim=1) to obtain
+    firing rates.
 
     Args:
         spike_initial (torch.Tensor): Initial spike activity. Shape (batch_size,

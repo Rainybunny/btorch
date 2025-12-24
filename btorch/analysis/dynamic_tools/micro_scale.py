@@ -68,7 +68,9 @@ def calculate_cv_isi(spikes, dt=1.0):
 
 
 def calculate_spike_distance(spikes, dt=1.0, subset_size=100, seed=None):
-    """计算 SPIKE-distance (Kreuz et al., 2013)。 衡量脉冲序列之间的不同步程度。0表示完全同步。
+    """计算 SPIKE-distance (Kreuz et al., 2013)。
+
+    衡量脉冲序列之间的不同步程度。0表示完全同步。
 
     Args:
         spikes: (Time, Neurons) 脉冲矩阵

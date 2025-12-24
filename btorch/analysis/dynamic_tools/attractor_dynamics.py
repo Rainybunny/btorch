@@ -9,11 +9,13 @@ def calculate_kaplan_yorke_dimension(lyapunov_spectrum: np.ndarray):
     where k is the max index such that the sum of the first k exponents is non-negative.
 
     Args:
-        lyapunov_spectrum (np.ndarray): Array of Lyapunov exponents, sorted in descending order.
+        lyapunov_spectrum (np.ndarray): Array of Lyapunov exponents, sorted in
+        descending order.
 
     Returns:
-        float: The Kaplan-Yorke dimension. Returns 0 if the system is stable (all lambda < 0).
-               Returns the number of exponents if the sum of all is positive (unbounded/hyperchaos).
+        float: The Kaplan-Yorke dimension. Returns 0 if the system is stable
+            (all lambda < 0). Returns the number of exponents if the sum of all
+            is positive (unbounded/hyperchaos).
     """
     # Ensure sorted descending
     ls = np.sort(lyapunov_spectrum)[::-1]
@@ -39,7 +41,8 @@ def calculate_kaplan_yorke_dimension(lyapunov_spectrum: np.ndarray):
         return float(n)
 
     # Apply formula
-    # Note: indices are 0-based in Python, so k corresponds to the (k+1)-th element in 1-based math notation.
+    # Note: indices are 0-based in Python, so k corresponds to the (k+1)-th
+    # element in 1-based math notation.
     # The formula uses 1-based k.
     # Let's map carefully:
     # Python index k is the index of the last element included in the sum.
@@ -51,7 +54,8 @@ def calculate_kaplan_yorke_dimension(lyapunov_spectrum: np.ndarray):
     lambda_next = ls[k + 1]
 
     if lambda_next == 0:
-        # Avoid division by zero, though theoretically lambda_{k+1} should be negative here
+        # Avoid division by zero, though theoretically lambda_{k+1} should be
+        # negative here.
         return float(k + 1)
 
     d_ky = (k + 1) + sum_lambda / abs(lambda_next)
@@ -65,14 +69,15 @@ def calculate_structural_eigenvalue_outliers(
     """Analyze the eigenvalues of the weight matrix to identify structural
     outliers.
 
-    According to the circular law, eigenvalues of a random matrix are distributed within a disk
-    of radius R. Outliers outside this radius indicate structural enforcement of specific
-    oscillatory modes (stable dynamics) rather than random chaos.
+    According to the circular law, eigenvalues of a random matrix are distributed
+    within a disk of radius R. Outliers outside this radius indicate structural
+    enforcement of specific oscillatory modes (stable dynamics) rather than
+    random chaos.
 
     Args:
         weight_matrix (np.ndarray): The connectivity weight matrix (N x N).
-        spectral_radius (float, optional): The theoretical spectral radius of the random component.
-                                           If None, it is estimated as std(W) * sqrt(N).
+        spectral_radius (float, optional): The theoretical spectral radius of the
+            random component. If None, it is estimated as std(W) * sqrt(N).
 
     Returns:
         dict: Dictionary containing:
