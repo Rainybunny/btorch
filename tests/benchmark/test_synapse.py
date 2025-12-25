@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.linalg import expm
 
-from ..utils.file import save_fig
+from btorch.utils.file import save_fig
 
 
 # --- Parameters ---

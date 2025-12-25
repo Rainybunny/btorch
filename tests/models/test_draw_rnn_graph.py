@@ -2,8 +2,8 @@ import pytest
 import torch
 
 from btorch.models.rnn import make_rnn
+from btorch.utils.file import fig_path
 from tests.models.test_rnn import last_step_sum, SimpleRNNCell
-from tests.utils.file import fig_path
 
 
 def test_draw_rnn_graph():

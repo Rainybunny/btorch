@@ -7,9 +7,9 @@ from typing import Callable, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 import scipy.sparse
-from btorch.models.init import build_sparse_mat
 
-from tests.utils.file import fig_path
+from btorch.models.init import build_sparse_mat
+from btorch.utils.file import fig_path
 
 
 np.random.seed(0)

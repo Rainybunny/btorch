@@ -6,7 +6,7 @@ from btorch.models.functional import init_net_state
 from btorch.models.init import build_sparse_mat, uniform_v_
 from btorch.models.neurons.glif import GLIF3
 from btorch.models.scale import scale_state_
-from tests.utils.file import save_fig
+from btorch.utils.file import save_fig
 
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")

@@ -8,7 +8,7 @@ from btorch.models import environ, linear, rnn, synapse
 from btorch.models.functional import init_net_state
 from btorch.models.init import build_dense_mat, uniform_v_
 from btorch.models.neurons.glif import GLIF3
-from tests.utils.file import fig_path
+from btorch.utils.file import fig_path
 
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")

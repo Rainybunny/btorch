@@ -1,9 +1,9 @@
 import matplotlib.pyplot as plt
 import torch
 import triton
-from btorch.models.ode import euler_step, exp_euler_step, exp_euler_step_auto
 
-from tests.utils.file import fig_path, save_fig
+from btorch.models.ode import euler_step, exp_euler_step
+from btorch.utils.file import fig_path, save_fig
 
 from ..utils.bench import do_bench
 
@@ -32,7 +32,7 @@ def test_numerically_close():
     def for_loop_exp_euler(x, n=steps):
         ret = torch.zeros(n)
         for i in range(n):
-            x = exp_euler_step_auto(f, x, dt=dt)
+            x = exp_euler_step(f, x, dt=dt)
             ret[i] = x
         return ret
 
@@ -86,10 +86,10 @@ def benchmark_ode_solvers(shape=(512, 512), device="cuda"):
         return euler_step(f, x, y, dt=dt)
 
     def exp_euler_step_auto_fn(x, y):
-        return exp_euler_step_auto(f, x, y, dt=dt)
+        return exp_euler_step(f, x, y, dt=dt)
 
     def exp_euler_step_fn(x, y):
-        return exp_euler_step(linear, f, x, y, dt=dt)
+        return exp_euler_step(f, x, y, dt=dt, linear=linear)
 
     def vanilla_exp_euler_fn(x, y):
         return vanilla_exp_euler(x, y, dt=dt)

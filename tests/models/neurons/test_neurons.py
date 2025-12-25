@@ -6,8 +6,7 @@ from btorch.models import environ
 from btorch.models.functional import init_net_state
 from btorch.models.neurons.alif import ALIF, ELIF
 from btorch.models.neurons.glif import GLIF3
-
-from ...utils.file import save_fig
+from btorch.utils.file import save_fig
 
 
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
