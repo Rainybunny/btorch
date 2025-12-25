@@ -14,6 +14,8 @@ Btorch is a brain-inspired Torch library for neuromorphic research. Follow the p
 
 - Match existing module structure and naming.
 - Use `jaxtyping` for tensor shapes where it clarifies intent.
+- Use modern Python type annotations (`|`, `list`, `dict`); avoid
+  `typing.Optional`/`typing.Union` unless absolutely required.
 - Be explicit about device, dtype, and batch/time dimensions.
 - Preserve torch.compile compatibility and ONNX friendliness where applicable.
 - Prefer buffers/register_memory for stateful tensors; validate shapes/dtypes.

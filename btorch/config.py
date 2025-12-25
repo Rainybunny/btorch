@@ -13,5 +13,6 @@ def env_to_bool(name, default):
 
 
 JIT_ENABLED = env_to_bool("BTORCH_JIT", True)
+SPARSE_BACKEND = os.environ.get("BTORCH_SPARSE_BACKEND", "torch_sparse").lower()
 
-__all__ = ["_enabled", "JIT_ENABLED"]
+__all__ = ["_enabled", "JIT_ENABLED", "SPARSE_BACKEND"]
