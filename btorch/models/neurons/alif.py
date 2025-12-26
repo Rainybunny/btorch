@@ -164,7 +164,23 @@ class ALIF(BaseNode):
             )
 
     def extra_repr(self):
-        return super().extra_repr()
+        g_k_init = self._memories_rv["g_k"].value
+        parts = [
+            f"c_m={self._format_repr_value(self.c_m)}",
+            f"g_leak={self._format_repr_value(self.g_leak)}",
+            f"E_leak={self._format_repr_value(self.E_leak)}",
+            f"E_k={self._format_repr_value(self.E_k)}",
+            f"tau_adapt={self._format_repr_value(self.tau_adapt)}",
+            f"dg_k={self._format_repr_value(self.dg_k)}",
+            f"g_k_init={self._format_repr_value(g_k_init)}",
+            f"tau_ref={self._format_repr_value(self.tau_ref)}"
+            if self._use_refractory
+            else "tau_ref=None",
+        ]
+        base = super().extra_repr()
+        if base:
+            parts.append(base)
+        return ", ".join(parts)
 
 
 class ELIF(ALIF):
@@ -243,4 +259,11 @@ class ELIF(ALIF):
         self.v = exp_euler_step(self.dV, self.v, self.g_k, x, dt=dt)
 
     def extra_repr(self):
-        return super().extra_repr()
+        parts = [
+            f"delta_T={self._format_repr_value(self.delta_T)}",
+            f"v_T={self._format_repr_value(self.v_T)}",
+        ]
+        base = super().extra_repr()
+        if base:
+            parts.append(base)
+        return ", ".join(parts)

@@ -162,6 +162,49 @@ class MemoryModule(base.MemoryModule):
         super().__init__()
         self._memories_rv: dict[str, ResetValue] = {}
 
+    @staticmethod
+    def _format_repr_value(value: Any) -> str:
+        if value is None:
+            return "None"
+        if isinstance(value, Callable):
+            return "callable"
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 1:
+                return f"{value.item():.4g}"
+            return f"shape={tuple(value.shape)}"
+        if isinstance(value, np.ndarray):
+            if value.size == 1:
+                return f"{float(value.reshape(-1)[0]):.4g}"
+            return f"shape={value.shape}"
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            array = np.asarray(value)
+            if array.size == 1:
+                return f"{float(array.reshape(-1)[0]):.4g}"
+            return f"shape={array.shape}"
+        return str(value)
+
+    def _memories_repr(self) -> str:
+        if not self._memories_rv:
+            return ""
+        entries = []
+        for name, reset_val in self._memories_rv.items():
+            extra = []
+            if reset_val.dtype is not None:
+                extra.append(str(reset_val.dtype).replace("torch.", ""))
+            if reset_val.persistent is not None:
+                extra.append("persistent" if reset_val.persistent else "non_persistent")
+            if reset_val.has_batch:
+                extra.append("has_batch")
+            extra_str = f" [{', '.join(extra)}]" if extra else ""
+            value_str = ""
+            if reset_val.value is not None:
+                value_str = f" init={self._format_repr_value(reset_val.value)}"
+            entries.append(f"{name}={reset_val.sizes}{value_str}{extra_str}")
+        return f"memories=({', '.join(entries)})"
+
+    def extra_repr(self):
+        return self._memories_repr()
+
     def register_memory(
         self,
         name: str,
@@ -404,6 +447,26 @@ class BaseNode(MemoryModule):
 
         self.step_mode = step_mode
         self.backend = backend
+
+    def extra_repr(self):
+        parts = [
+            f"n_neuron={self.n_neuron}",
+            f"v_threshold={self._format_repr_value(self.v_threshold)}",
+            f"v_reset={self._format_repr_value(self.v_reset)}",
+            f"step_mode={self.step_mode}",
+            f"backend={self.backend}",
+            f"surrogate={self.surrogate_function.__class__.__name__}",
+        ]
+        if self.detach_reset:
+            parts.append("detach_reset=True")
+        if self.hard_reset:
+            parts.append("hard_reset=True")
+        if self.pre_spike_v:
+            parts.append("pre_spike_v=True")
+        mem_repr = super().extra_repr()
+        if mem_repr:
+            parts.append(mem_repr)
+        return ", ".join(parts)
 
     # TODO: improve
     def _def_param(self, name, val, *, allow_trailing_dims: bool = False, **kwargs):

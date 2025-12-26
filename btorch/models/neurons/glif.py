@@ -186,8 +186,23 @@ class GLIF3(BaseNode, SupportScaleState):
             )
 
     def extra_repr(self):
-        # TODO
-        return super().extra_repr()
+        parts = [
+            f"c_m={self._format_repr_value(self.c_m)}",
+            f"tau={self._format_repr_value(self.tau)}",
+            f"tau_ref={self._format_repr_value(self.tau_ref)}"
+            if self._use_refractory
+            else "tau_ref=None",
+            f"n_Iasc={self.n_Iasc}",
+            f"k={self._format_repr_value(self.k)}",
+            f"asc_amps={self._format_repr_value(self.asc_amps)}",
+            "v_rest=auto"
+            if self._v_rest is None
+            else f"v_rest={self._format_repr_value(self._v_rest)}",
+        ]
+        base = super().extra_repr()
+        if base:
+            parts.append(base)
+        return ", ".join(parts)
 
     # TODO: headache to define precise input-output shapes
     # TODO: shape handling not torch.compile friendly

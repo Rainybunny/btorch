@@ -223,4 +223,16 @@ class Izhikevich(BaseNode):
         self.u += self.d * spike_d
 
     def extra_repr(self):
-        return super().extra_repr()
+        parts = [
+            f"c_m={self._format_repr_value(self.c_m)}",
+            f"k={self._format_repr_value(self.k)}",
+            f"a={self._format_repr_value(self.a)}",
+            f"b={self._format_repr_value(self.b)}",
+            f"d={self._format_repr_value(self.d)}",
+            f"v_rest={self._format_repr_value(self.v_rest)}",
+            f"v_peak={self._format_repr_value(self.v_peak)}",
+        ]
+        base = super().extra_repr()
+        if base:
+            parts.append(base)
+        return ", ".join(parts)

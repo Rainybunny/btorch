@@ -126,7 +126,20 @@ class LIF(BaseNode, SupportScaleState):
             )
 
     def extra_repr(self):
-        return super().extra_repr()
+        parts = [
+            f"c_m={self._format_repr_value(self.c_m)}",
+            f"tau={self._format_repr_value(self.tau)}",
+            f"tau_ref={self._format_repr_value(self.tau_ref)}"
+            if self._use_refractory
+            else "tau_ref=None",
+            "v_rest=auto"
+            if self._v_rest is None
+            else f"v_rest={self._format_repr_value(self._v_rest)}",
+        ]
+        base = super().extra_repr()
+        if base:
+            parts.append(base)
+        return ", ".join(parts)
 
 
 class IF(LIF):
