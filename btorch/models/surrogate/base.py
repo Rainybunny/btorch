@@ -8,11 +8,6 @@ def _heaviside(x: torch.Tensor) -> torch.Tensor:
     return (x >= 0).to(x)
 
 
-@jit.script
-def _damp(grad: torch.Tensor, damping: float) -> torch.Tensor:
-    return grad * damping
-
-
 class _SurrogateAutograd(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: torch.Tensor, module: "SurrogateFunctionBase"):
@@ -26,9 +21,7 @@ class _SurrogateAutograd(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor):
         (x,) = ctx.saved_tensors
         module: SurrogateFunctionBase = ctx.module
-        grad = module.derivative(x)
-        if module.damping_factor != 1.0:
-            grad = _damp(grad, module.damping_factor)
+        grad = module.derivative(x, module.damping_factor)
         return grad_output * grad, None
 
 
@@ -57,7 +50,7 @@ class SurrogateFunctionBase(torch.nn.Module):
     def primitive(self, x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
-    def derivative(self, x: torch.Tensor) -> torch.Tensor:
+    def derivative(self, x: torch.Tensor, damping_factor: float = 1.0) -> torch.Tensor:
         raise NotImplementedError
 
     def forward(self, x: torch.Tensor):

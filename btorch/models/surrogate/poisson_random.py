@@ -62,9 +62,12 @@ class PoissonRandomSpike(SurrogateFunctionBase):
         mask = (x >= 0.0).to(x)
         return (self.leak * (1.0 - mask) + self.k * mask) * x
 
-    def derivative(self, x: torch.Tensor) -> torch.Tensor:
+    def derivative(self, x: torch.Tensor, damping_factor: float = 1.0) -> torch.Tensor:
         mask = (x >= 0.0).to(x)
-        return mask * self.k + (1.0 - mask) * self.leak
+        grad = mask * self.k + (1.0 - mask) * self.leak
+        if damping_factor != 1.0:
+            grad = grad * damping_factor
+        return grad
 
     def forward(self, x: torch.Tensor):
         return _PoissonRandomSpikeFn.apply(

@@ -11,9 +11,9 @@ def _sigmoid_primitive(x: torch.Tensor, alpha: float) -> torch.Tensor:
 
 
 @jit.script
-def _sigmoid_derivative(x: torch.Tensor, alpha: float) -> torch.Tensor:
+def _sigmoid_derivative(x: torch.Tensor, alpha: float, damping: float) -> torch.Tensor:
     sigma = torch.sigmoid(alpha * x)
-    return alpha * sigma * (1 - sigma)
+    return damping * alpha * sigma * (1 - sigma)
 
 
 class Sigmoid(SurrogateFunctionBase):
@@ -22,8 +22,8 @@ class Sigmoid(SurrogateFunctionBase):
     def primitive(self, x: torch.Tensor) -> torch.Tensor:
         return _sigmoid_primitive(x, self.alpha)
 
-    def derivative(self, x: torch.Tensor) -> torch.Tensor:
-        return _sigmoid_derivative(x, self.alpha)
+    def derivative(self, x: torch.Tensor, damping_factor: float = 1.0) -> torch.Tensor:
+        return _sigmoid_derivative(x, self.alpha, damping_factor)
 
 
 def sigmoid(
