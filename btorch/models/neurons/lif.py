@@ -16,10 +16,10 @@ from ..types import TensorLike
 class LIF(BaseNode, SupportScaleState):
     """Leaky integrate-and-fire neuron with optional refractory period."""
 
-    refractory: torch.Tensor
+    refractory: torch.Tensor | None
     c_m: torch.Tensor | torch.nn.Parameter
     tau: torch.Tensor | torch.nn.Parameter
-    tau_ref: torch.Tensor | torch.nn.Parameter
+    tau_ref: torch.Tensor | torch.nn.Parameter | None
 
     def __init__(
         self,
@@ -29,7 +29,7 @@ class LIF(BaseNode, SupportScaleState):
         v_rest: None | float | Float[TensorLike, " n_neuron"] = None,
         c_m: float | Float[TensorLike, " n_neuron"] = 1.0,
         tau: float | Float[TensorLike, " n_neuron"] = 20.0,
-        tau_ref: float | Float[TensorLike, " n_neuron"] = 0.0,
+        tau_ref: float | Float[TensorLike, " n_neuron"] | None = None,
         trainable_param: set[str] = set(),
         surrogate_function: Callable = Sigmoid(),
         detach_reset: bool = False,
@@ -57,14 +57,17 @@ class LIF(BaseNode, SupportScaleState):
         _factory_kwargs: dict[str, Any] = {"device": device, "dtype": dtype}
         self._def_param("c_m", c_m, **_factory_kwargs)
         self._def_param("tau", tau, **_factory_kwargs)
-        self._def_param("tau_ref", tau_ref, **_factory_kwargs)
+        self._use_refractory = tau_ref is not None
+        if self._use_refractory:
+            self._def_param("tau_ref", tau_ref, **_factory_kwargs)
+            self.register_memory("refractory", 0.0, self.n_neuron)
+        else:
+            self.tau_ref = None
 
         if v_rest is not None:
             self._def_param("_v_rest", v_rest, **_factory_kwargs)
         else:
             self._v_rest = None
-
-        self.register_memory("refractory", 0.0, self.n_neuron)
 
     @property
     def v_rest(self):
@@ -94,10 +97,13 @@ class LIF(BaseNode, SupportScaleState):
         return None
 
     def neuronal_fire(self):
-        not_in_refractory = self.refractory == 0
         spike = self.surrogate_function(
             (self.v - self.v_threshold) / (self.v_threshold - self.v_reset)
-        ) * not_in_refractory.detach().to(self.v.dtype)
+        )
+        if not self._use_refractory:
+            return spike
+        not_in_refractory = self.refractory == 0
+        spike = spike * not_in_refractory.detach().to(self.v.dtype)
         return spike
 
     def neuronal_reset(self, spike: Float[Tensor, "*batch n"]):
@@ -114,9 +120,10 @@ class LIF(BaseNode, SupportScaleState):
         else:
             self.v -= (self.v_threshold - self.v_reset) * spike_d
 
-        self.refractory = torch.relu(
-            self.refractory + spike_d * self.tau_ref - environ.get("dt")
-        )
+        if self._use_refractory:
+            self.refractory = torch.relu(
+                self.refractory + spike_d * self.tau_ref - environ.get("dt")
+            )
 
     def extra_repr(self):
         return super().extra_repr()

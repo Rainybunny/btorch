@@ -23,7 +23,7 @@ class ALIF(BaseNode):
     """
 
     g_k: torch.Tensor
-    refractory: torch.Tensor
+    refractory: torch.Tensor | None
 
     c_m: torch.Tensor | torch.nn.Parameter
     g_leak: torch.Tensor | torch.nn.Parameter
@@ -31,7 +31,7 @@ class ALIF(BaseNode):
     E_k: torch.Tensor | torch.nn.Parameter
     tau_adapt: torch.Tensor | torch.nn.Parameter
     dg_k: torch.Tensor | torch.nn.Parameter
-    tau_ref: torch.Tensor | torch.nn.Parameter
+    tau_ref: torch.Tensor | torch.nn.Parameter | None
 
     def __init__(
         self,
@@ -45,7 +45,7 @@ class ALIF(BaseNode):
         g_k_init: float | Float[TensorLike, " n_neuron"] = 0.0,
         tau_adapt: float | Float[TensorLike, " n_neuron"] = 20.0,
         dg_k: float | Float[TensorLike, " n_neuron"] = 0.0,
-        tau_ref: float | Float[TensorLike, " n_neuron"] = 0.0,
+        tau_ref: float | Float[TensorLike, " n_neuron"] | None = None,
         trainable_param: set[str] = set(),
         surrogate_function: Callable = Sigmoid(),
         detach_reset: bool = False,
@@ -77,10 +77,14 @@ class ALIF(BaseNode):
         self._def_param("E_k", E_k, **_factory_kwargs)
         self._def_param("tau_adapt", tau_adapt, **_factory_kwargs)
         self._def_param("dg_k", dg_k, **_factory_kwargs)
-        self._def_param("tau_ref", tau_ref, **_factory_kwargs)
+        self._use_refractory = tau_ref is not None
+        if self._use_refractory:
+            self._def_param("tau_ref", tau_ref, **_factory_kwargs)
+            self.register_memory("refractory", 0.0, self.n_neuron)
+        else:
+            self.tau_ref = None
 
         self.register_memory("g_k", g_k_init, self.n_neuron)
-        self.register_memory("refractory", 0.0, self.n_neuron)
 
     @property
     def v_rest(self):
@@ -129,10 +133,13 @@ class ALIF(BaseNode):
         self.g_k = exp_euler_step(self.dgk, self.g_k, dt=dt)
 
     def neuronal_fire(self):
-        not_in_refractory = self.refractory == 0
         spike = self.surrogate_function(
             (self.v - self.v_threshold) / (self.v_threshold - self.v_reset)
-        ) * not_in_refractory.detach().to(self.v.dtype)
+        )
+        if not self._use_refractory:
+            return spike
+        not_in_refractory = self.refractory == 0
+        spike = spike * not_in_refractory.detach().to(self.v.dtype)
         return spike
 
     def neuronal_reset(self, spike: Float[Tensor, "*batch n"]):
@@ -151,9 +158,10 @@ class ALIF(BaseNode):
 
         self.g_k += self.dg_k * spike_d
 
-        self.refractory = torch.relu(
-            self.refractory + spike_d * self.tau_ref - environ.get("dt")
-        )
+        if self._use_refractory:
+            self.refractory = torch.relu(
+                self.refractory + spike_d * self.tau_ref - environ.get("dt")
+            )
 
     def extra_repr(self):
         return super().extra_repr()
@@ -178,7 +186,7 @@ class ELIF(ALIF):
         g_k_init: float | Float[TensorLike, " n_neuron"] = 0.0,
         tau_adapt: float | Float[TensorLike, " n_neuron"] = 20.0,
         dg_k: float | Float[TensorLike, " n_neuron"] = 0.0,
-        tau_ref: float | Float[TensorLike, " n_neuron"] = 0.0,
+        tau_ref: float | Float[TensorLike, " n_neuron"] | None = 0.0,
         delta_T: float | Float[TensorLike, " n_neuron"] = 1.0,
         v_T: float | Float[TensorLike, " n_neuron"] = 0.0,
         trainable_param: set[str] = set(),

@@ -27,11 +27,11 @@ class GLIF3(BaseNode, SupportScaleState):
 
     # make mypy typing and autocompletion easier
     Iasc: torch.Tensor
-    refractory: torch.Tensor
+    refractory: torch.Tensor | None
 
     c_m: torch.Tensor | torch.nn.Parameter
     tau: torch.Tensor | torch.nn.Parameter
-    tau_ref: torch.Tensor | torch.nn.Parameter
+    tau_ref: torch.Tensor | torch.nn.Parameter | None
     k: torch.Tensor | torch.nn.Parameter
     asc_amps: torch.Tensor | torch.nn.Parameter
 
@@ -49,7 +49,7 @@ class GLIF3(BaseNode, SupportScaleState):
         asc_amps: float
         | Sequence[float]
         | Float[TensorLike, "n_neuron {self.n_Iasc}"] = [0.0],  # pA
-        tau_ref: float | Float[TensorLike, " n_neuron"] = 0.0,  # ms
+        tau_ref: float | Float[TensorLike, " n_neuron"] | None = 0.0,  # ms
         trainable_param: set[str] = set(),
         surrogate_function: Callable = ATan(),
         detach_reset: bool = False,
@@ -75,7 +75,12 @@ class GLIF3(BaseNode, SupportScaleState):
         self.hard_reset = hard_reset
         self._def_param("c_m", c_m, **_factory_kwargs)
         self._def_param("tau", tau, **_factory_kwargs)
-        self._def_param("tau_ref", tau_ref, **_factory_kwargs)
+        self._use_refractory = tau_ref is not None
+        if self._use_refractory:
+            self._def_param("tau_ref", tau_ref, **_factory_kwargs)
+            self.register_memory("refractory", 0.0, self.n_neuron)
+        else:
+            self.tau_ref = None
 
         # for compat
         if v_rest is not None:
@@ -105,7 +110,6 @@ class GLIF3(BaseNode, SupportScaleState):
             * self.n_Iasc,
             self.n_neuron + (self.n_Iasc,),
         )
-        self.register_memory("refractory", 0.0, self.n_neuron)
 
     @property
     def v_rest(self):
@@ -147,10 +151,13 @@ class GLIF3(BaseNode, SupportScaleState):
 
     def neuronal_fire(self):
         # Check if voltage exceeds threshold and not in refractory period
-        not_in_refractory = self.refractory == 0
         spike = self.surrogate_function(
             (self.v - self.v_threshold) / (self.v_threshold - self.v_reset)
-        ) * not_in_refractory.detach().to(self.v.dtype)
+        )
+        if not self._use_refractory:
+            return spike
+        not_in_refractory = self.refractory == 0
+        spike = spike * not_in_refractory.detach().to(self.v.dtype)
         return spike
 
     def neuronal_reset(self, spike: Float[Tensor, "*batch n"]):
@@ -172,10 +179,11 @@ class GLIF3(BaseNode, SupportScaleState):
         # Add after-spike currents
         self.Iasc += self.asc_amps * spike_d[..., None]
 
-        # Set refractory period
-        self.refractory = torch.relu(
-            self.refractory + spike_d * self.tau_ref - environ.get("dt")
-        )
+        if self._use_refractory:
+            # Set refractory period
+            self.refractory = torch.relu(
+                self.refractory + spike_d * self.tau_ref - environ.get("dt")
+            )
 
     def extra_repr(self):
         # TODO
