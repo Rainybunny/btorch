@@ -38,13 +38,13 @@ class BasePSC(MemoryModule):
         self.n_neuron, self.size = normalize_n_neuron(n_neuron)
         self.step_mode = step_mode
         self.backend = backend
-        self.latency_steps = round(latency / environ.get("dt"))
         self.latency = latency
         self.linear = linear
 
         self.register_memory("psc", 0.0, self.n_neuron)
 
         if latency > 0:
+            self.latency_steps = round(latency / environ.get("dt"))
             self.register_memory(
                 "delay_buffer",
                 0,
@@ -147,7 +147,7 @@ class BasePSC(MemoryModule):
     def single_step_forward(self, z: torch.Tensor):
         if self.latency > 0.0:
             self.delay_buffer = torch.cat(
-                (z.unsqueeze(dim=0), self.delay_buffer[:-1].clone()), dim=0
+                (z.unsqueeze(dim=0), self.delay_buffer[:-1]), dim=0
             )
             spike = self.delay_buffer[-1]
         else:

@@ -17,7 +17,7 @@ def _run_lif(
             init_net_state(neuron, dtype=x_seq.dtype, device=x_seq.device)
         else:
             reset_net_state(neuron)
-        out = neuron.multi_step_forward(x_seq)
+        out = neuron(x_seq)
         return out, neuron.v.detach().clone()
 
 
@@ -37,14 +37,14 @@ def test_compiled_lif_matches_eager_after_dt_change():
         v_threshold=10.0,
         v_reset=0.0,
         tau=5.0,
-        step_mode="s",
+        step_mode="m",
     )
     compiled = LIF(
         n_neuron=n_neuron,
         v_threshold=10.0,
         v_reset=0.0,
         tau=5.0,
-        step_mode="s",
+        step_mode="m",
     )
     compiled = compile_or_skip(compiled)
 
@@ -64,7 +64,7 @@ def test_compiled_lif_matches_eager_after_dt_change():
         v_threshold=10.0,
         v_reset=0.0,
         tau=5.0,
-        step_mode="s",
+        step_mode="m",
     )
     compiled_second = compile_or_skip(compiled_second)
     out_compiled_second, v_compiled_second = _run_lif(

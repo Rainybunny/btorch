@@ -131,7 +131,7 @@ def test_checkpointed_sparseconn_matches_eager_dense(backend: str):
 
     reset_net_state(rnn_sparse, batch_size=batch_size)
 
-    out_sparse, _ = rnn_sparse.multi_step_forward(x_sparse)
+    out_sparse, _ = rnn_sparse(x_sparse)
     out_native = native_rnncell_forward(native_cell, x_native)
 
     torch.testing.assert_close(out_sparse, out_native, atol=1e-6, rtol=0.0)
@@ -219,8 +219,8 @@ def test_sparse_rnn_compiled_matches_eager(backend: str):
     reset_net_state(rnn_eager, batch_size=batch_size)
     reset_net_state(compiled, batch_size=batch_size)
 
-    out_eager, _ = rnn_eager.multi_step_forward(x)
-    out_compiled, _ = compiled.multi_step_forward(x_compiled)
+    out_eager, _ = rnn_eager(x)
+    out_compiled, _ = compiled(x_compiled)
 
     torch.testing.assert_close(out_eager, out_compiled, atol=1e-6, rtol=0.0)
 

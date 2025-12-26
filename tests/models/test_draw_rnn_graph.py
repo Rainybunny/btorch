@@ -31,7 +31,7 @@ def test_draw_rnn_graph():
     x = torch.ones(T, batch_size, input_size, requires_grad=True)
 
     rnn.reset()
-    out, _ = rnn.multi_step_forward(x)
+    out, _ = rnn(x)
     loss = last_step_sum(out)
     loss.backward()
 

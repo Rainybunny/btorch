@@ -120,7 +120,7 @@ class TestGradientCorrectness:
         x = torch.randn(T, 2, 4, requires_grad=True)
 
         reset_net_state(rnn, batch_size=2)
-        out, _ = rnn.multi_step_forward(x)
+        out, _ = rnn(x)
         loss = last_step_sum(out)
         loss.backward()
 
@@ -159,7 +159,7 @@ class TestGradientCorrectness:
         x_native = x.detach().clone().requires_grad_(True)
 
         reset_net_state(rnn, batch_size=batch_size)
-        out, _ = rnn.multi_step_forward(x)
+        out, _ = rnn(x)
         loss = last_step_sum(out)
         loss.backward()
 
@@ -190,7 +190,7 @@ class TestGradientCorrectness:
 
         reset_net_state(rnn_no_checkpoint, batch_size=batch_size)
         # Forward pass
-        out, states = rnn_no_checkpoint.multi_step_forward(x)
+        out, states = rnn_no_checkpoint(x)
 
         # Compute loss
         loss = last_step_sum(out)
@@ -214,7 +214,7 @@ class TestGradientCorrectness:
         x = torch.randn(T, batch_size, input_size, requires_grad=True)
         reset_net_state(rnn_with_checkpoint, batch_size=batch_size)
         # Forward pass
-        out, states = rnn_with_checkpoint.multi_step_forward(x)
+        out, states = rnn_with_checkpoint(x)
 
         # Compute loss
         loss = last_step_sum(out)
@@ -256,9 +256,9 @@ class TestGradientCorrectness:
 
         # Forward passes
         reset_net_state(rnn_no_chkpt, batch_size=batch_size)
-        out_no_chkpt, _ = rnn_no_chkpt.multi_step_forward(x)
+        out_no_chkpt, _ = rnn_no_chkpt(x)
         reset_net_state(rnn_chkpt, batch_size=batch_size)
-        out_chkpt, _ = rnn_chkpt.multi_step_forward(x_chkpt)
+        out_chkpt, _ = rnn_chkpt(x_chkpt)
 
         # Check outputs are identical
         assert torch.allclose(
@@ -311,8 +311,8 @@ class TestGradientCorrectness:
         reset_net_state(rnn_eager, batch_size=batch_size)
         reset_net_state(compiled, batch_size=batch_size)
 
-        out_eager, _ = rnn_eager.multi_step_forward(x)
-        out_compiled, _ = compiled.multi_step_forward(x_compiled)
+        out_eager, _ = rnn_eager(x)
+        out_compiled, _ = compiled(x_compiled)
 
         assert torch.allclose(
             out_eager, out_compiled, atol=1e-6
@@ -349,7 +349,7 @@ class TestGradientCorrectness:
 
         # Forward and backward
         reset_net_state(rnn, batch_size=batch_size)
-        out, _ = rnn.multi_step_forward(x)
+        out, _ = rnn(x)
         loss = out.sum()
         loss.backward()
 
@@ -373,7 +373,7 @@ class TestGradientCorrectness:
         x = torch.randn(T, batch_size, 4, requires_grad=True)
 
         reset_net_state(rnn, batch_size=batch_size)
-        out, _ = rnn.multi_step_forward(x)
+        out, _ = rnn(x)
         loss = last_step_sum(out)
         loss.backward()
 
@@ -401,7 +401,7 @@ class TestGradientCorrectness:
         # First backward pass
         x1 = torch.randn(T, batch_size, 4, requires_grad=True)
         reset_net_state(rnn, batch_size=batch_size)
-        out1, _ = rnn.multi_step_forward(x1)
+        out1, _ = rnn(x1)
         loss1 = out1[-1].sum()
         loss1.backward()
 
@@ -410,7 +410,7 @@ class TestGradientCorrectness:
         # Second backward pass (accumulate)
         x2 = torch.randn(T, batch_size, 4, requires_grad=True)
         rnn.rnn_cell.h = rnn.rnn_cell.h.detach()
-        out2, _ = rnn.multi_step_forward(x2)
+        out2, _ = rnn(x2)
         loss2 = out2[-1].sum()
         loss2.backward()
 

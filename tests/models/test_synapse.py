@@ -83,10 +83,10 @@ def test_exponential_psc_latency_matches_manual():
             tau_syn=tau_syn,
             linear=linear,
             latency=latency,
-            step_mode="s",
+            step_mode="m",
         )
         init_net_state(synapse, dtype=torch.float32)
-        out = synapse.multi_step_forward(z_seq)
+        out = synapse(z_seq)
 
     expected = _expected_exponential_psc(
         z_seq,
@@ -122,14 +122,14 @@ def test_exponential_psc_latency_grad_matches_compile():
             tau_syn=tau_syn,
             linear=torch.nn.Linear(n_neuron, n_neuron, bias=False),
             latency=latency,
-            step_mode="s",
+            step_mode="m",
         )
         compiled = ExponentialPSC(
             n_neuron=n_neuron,
             tau_syn=tau_syn,
             linear=torch.nn.Linear(n_neuron, n_neuron, bias=False),
             latency=latency,
-            step_mode="s",
+            step_mode="m",
         )
 
     compiled.linear.weight.data.copy_(eager.linear.weight.data)
@@ -140,8 +140,8 @@ def test_exponential_psc_latency_grad_matches_compile():
         init_net_state(eager)
         init_net_state(compiled)
 
-        out_eager = eager.multi_step_forward(z_seq)
-        out_compiled = compiled.multi_step_forward(z_seq_compiled)
+        out_eager = eager(z_seq)
+        out_compiled = compiled(z_seq_compiled)
 
     torch.testing.assert_close(out_eager, out_compiled, atol=1e-6, rtol=0.0)
 
