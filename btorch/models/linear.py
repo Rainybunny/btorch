@@ -1,4 +1,4 @@
-from typing import get_args, Literal
+from typing import Literal, get_args
 
 import numpy as np
 import pandas as pd
@@ -136,6 +136,8 @@ class BaseSparseConn(nn.Module):
         # TODO: should update at each time of mod.load_state
         #       maybe a source of checkpoint loading bug!!
         self.sparse_tensor = None
+        if dtype is None:
+            value = value.to(torch.float32)
         if self.sparse_backend == "native":
             native_sparse = torch.sparse_coo_tensor(
                 indices=indices,
@@ -202,18 +204,13 @@ class BaseSparseConn(nn.Module):
                 indices=sp.indices(),
                 values=effective_value,
                 size=self.shape,
-                device=x.device,
-                dtype=x.dtype,
                 is_coalesced=True,
             )
-            self.sparse_tensor = sp
             # (A^T @ x^T)^T == x @ A
             out = torch.sparse.mm(sp, x_2d.T).T
         else:
-            self.sparse_tensor = self.sparse_tensor.to(
-                device=x.device, dtype=x.dtype
-            ).set_value(effective_value, layout="coo")
-            out = spmat(self.sparse_tensor, x_2d.T)
+            sparse_tensor = self.sparse_tensor.set_value(effective_value, layout="coo")
+            out = spmat(sparse_tensor, x_2d.T)
             out = out.T
         out = out.reshape(*leading_shape, self.out_features)
         if no_batch:
