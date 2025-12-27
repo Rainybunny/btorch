@@ -109,19 +109,38 @@ class EnvInputLayer(NeuronEmbedMapLayer):
 
     def forward(self, observ: dict[str, Any]):
         # TODO: merge these into one scatter
-        ret = None
+        all_srcs = []
+        all_indices = []
+        batch_shape = None
+        device = None
+        dtype = None
+
         for k, v in observ.items():
             embed, neuron_id = self.neuron_embed_map[k]
             src = embed(v)
-            neuron_id = torch.tensor(neuron_id, dtype=torch.long, device=src.device)
-            index = expand_leading_dims(neuron_id, src.shape[:-1])
-            if ret is None:
-                ret = torch.zeros(
-                    src.shape[:-1] + (self.n_neuron,),
-                    device=src.device,
-                    dtype=src.dtype,
-                )
-            ret = ret.scatter_add(dim=-1, index=index, src=src)
+            if batch_shape is None:
+                batch_shape = src.shape[:-1]
+                device = src.device
+                dtype = src.dtype
+
+            neuron_id = torch.tensor(neuron_id, dtype=torch.long, device=device)
+            index = expand_leading_dims(neuron_id, batch_shape)
+
+            all_srcs.append(src)
+            all_indices.append(index)
+
+        if not all_srcs:
+            return None
+
+        merged_src = torch.cat(all_srcs, dim=-1)
+        merged_index = torch.cat(all_indices, dim=-1)
+
+        ret = torch.zeros(
+            batch_shape + (self.n_neuron,),
+            device=device,
+            dtype=dtype,
+        )
+        ret = ret.scatter_add(dim=-1, index=merged_index, src=merged_src)
         return ret
 
 
@@ -173,9 +192,45 @@ class EnvOutputLayer(NeuronEmbedMapLayer):
             )  # Hz
         if output_choice is None:
             output_choice = tuple(self.neuron_embed_map.keys())
+        # Group by out_attr to merge gathers
+        grouped_requests = {}
         for name in output_choice:
             embed, neuron_id, out_attr = self.neuron_embed_map[name]
-            ret[name] = embed(x[out_attr][..., neuron_id])
+            if out_attr not in grouped_requests:
+                grouped_requests[out_attr] = []
+            grouped_requests[out_attr].append((name, embed, neuron_id))
+
+        for out_attr, requests in grouped_requests.items():
+            # requests is list of (name, embed, neuron_id)
+            if not requests:
+                continue
+
+            names, embeds, neuron_ids = zip(*requests)
+
+            # If only one item, simple path? (Optional optimization, but strictly
+            # following 'merged')
+            # Keeping consistent merged path:
+
+            # Ensure neuron_ids are tensors on correct device
+            # Note: We assume x[out_attr] is on the device we want to compute on.
+            device = x[out_attr].device
+            neuron_ids_tensors = [
+                torch.as_tensor(nid, device=device, dtype=torch.long)
+                for nid in neuron_ids
+            ]
+            split_sections = [nid.shape[0] for nid in neuron_ids_tensors]
+
+            all_ids = torch.cat(neuron_ids_tensors)
+
+            # Gather
+            gathered_all = x[out_attr][..., all_ids]
+
+            # Split
+            gathered_splits = torch.split(gathered_all, split_sections, dim=-1)
+
+            # Apply embeds
+            for i, name in enumerate(names):
+                ret[name] = embeds[i](gathered_splits[i])
 
         return ret
 
