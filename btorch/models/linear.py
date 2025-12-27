@@ -160,9 +160,9 @@ class BaseSparseConn(nn.Module):
         self.bias = nn.Parameter(bias) if bias is not None else None
         self._init_weights(value)
 
-    def to(self, *args, **kwargs):
-        self.sparse_tensor.to(*args, **kwargs)
-        return super().to(*args, **kwargs)
+    def _apply(self, fn, recurse=True):
+        self.sparse_tensor = fn(self.sparse_tensor)
+        return super()._apply(fn, recurse=recurse)
 
     def _init_weights(self, value: torch.Tensor):
         """Abstract method to initialize layer-specific weights.

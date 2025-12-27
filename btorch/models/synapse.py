@@ -145,7 +145,7 @@ class BasePSC(MemoryModule):
             return self.psc
 
     def single_step_forward(self, z: torch.Tensor):
-        if self.latency > 0.0:
+        if self.latency > 0:
             self.delay_buffer = torch.cat(
                 (z.unsqueeze(dim=0), self.delay_buffer[:-1]), dim=0
             )

@@ -119,7 +119,7 @@ def test_compiled_unroll_recompilation(grad_checkpoint):
     # Clean up any previous compilation stats
     torch._dynamo.reset()
 
-    T = 52
+    T = 102
     batch_size = 1
     input_size = 10
     hidden_size = 20
@@ -150,7 +150,7 @@ def test_compiled_unroll_recompilation(grad_checkpoint):
 
     # Expectation:
     # 1. Outer trace (partial due to disable) = 1 capture
-    # 2. Inner unrolled function (size 10) = 1 capture (reused 5 times)
+    # 2. Inner unrolled function (size 10) = 1 capture (reused 10 times)
     # 3. Inner unrolled function (size 2, remainder) = 1 capture
     # Total = 3
 
