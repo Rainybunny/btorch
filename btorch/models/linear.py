@@ -13,9 +13,11 @@ from .constrain import HasConstraint
 
 
 try:
-    from torch_sparse import SparseTensor
+    from torch_sparse import spmm
+
+    spmm = torch.compiler.disable(spmm)
 except ImportError:
-    SparseTensor = None
+    spmm = None
 
 SparseBackend = Literal["native", "torch_sparse"]
 DEFAULT_SPARSE_BACKEND = SPARSE_BACKEND
@@ -27,7 +29,7 @@ def _resolve_sparse_backend(backend: str | None) -> SparseBackend:
         raise ValueError(
             f"sparse_backend must be 'native' or 'torch_sparse', got '{backend}'."
         )
-    if backend == "torch_sparse" and SparseTensor is None:
+    if backend == "torch_sparse" and spmm is None:
         raise ImportError("torch_sparse is required for sparse_backend='torch_sparse'.")
     return backend  # type: ignore[return-value]
 
@@ -35,7 +37,7 @@ def _resolve_sparse_backend(backend: str | None) -> SparseBackend:
 def available_sparse_backends() -> list[SparseBackend]:
     """Return the sparse backends that can be used in this environment."""
     backends = list(get_args(SparseBackend))
-    if SparseTensor is None and "torch_sparse" in backends:
+    if spmm is None and "torch_sparse" in backends:
         backends.remove("torch_sparse")
     return backends
 
@@ -69,13 +71,6 @@ class DenseConn(nn.Linear):
             self.bias.data = bias
 
 
-@torch.compiler.disable
-def spmat(A, x):
-    # pytorch_sparse bug. doesn't support torch.compile atm.
-    # https://github.com/rusty1s/pytorch_sparse/issues/400
-    return A @ x
-
-
 class BaseSparseConn(nn.Module):
     """Abstract base class for sparse linear layers using a fixed sparse
     connection matrix.
@@ -95,7 +90,7 @@ class BaseSparseConn(nn.Module):
     out_features: int
     shape: tuple[int, int]
     indices: torch.Tensor
-    sparse_tensor: SparseTensor | torch.Tensor
+    sparse_tensor: torch.Tensor | None
     bias: torch.nn.Parameter | None
 
     def __init__(
@@ -147,20 +142,14 @@ class BaseSparseConn(nn.Module):
                 is_coalesced=True,
             )
             self.sparse_tensor = native_sparse
-        elif self.sparse_backend == "torch_sparse":
-            self.sparse_tensor = SparseTensor(
-                row=self.indices[0],
-                col=self.indices[1],
-                value=None,
-                sparse_sizes=conn.shape,
-                is_sorted=True,
-                trust_data=False,
-            ).to(device=device, dtype=dtype)  # type: ignore
+        else:
+            self.sparse_tensor = None
         self.bias = nn.Parameter(bias) if bias is not None else None
         self._init_weights(value)
 
     def _apply(self, fn, recurse=True):
-        self.sparse_tensor = fn(self.sparse_tensor)
+        if self.sparse_tensor is not None:
+            self.sparse_tensor = fn(self.sparse_tensor)
         return super()._apply(fn, recurse=recurse)
 
     def _init_weights(self, value: torch.Tensor):
@@ -208,8 +197,7 @@ class BaseSparseConn(nn.Module):
             # (A^T @ x^T)^T == x @ A
             out = torch.sparse.mm(sp, x_2d.T).T
         else:
-            sparse_tensor = self.sparse_tensor.set_value(effective_value, layout="coo")
-            out = spmat(sparse_tensor, x_2d.T)
+            out = spmm(self.indices, effective_value, *self.shape[::-1], x_2d.T)
             out = out.T
         out = out.reshape(*leading_shape, self.out_features)
         if no_batch:
@@ -296,6 +284,7 @@ class SparseConstrainedConn(BaseSparseConn, HasConstraint):
     initial_weight: torch.Tensor
     magnitude: torch.nn.Parameter
     _constraint_scatter_indices: torch.Tensor
+    constraint_info: dict | None
 
     def __init__(
         self,
@@ -318,6 +307,7 @@ class SparseConstrainedConn(BaseSparseConn, HasConstraint):
             sparse_backend: "native" or "torch_sparse".
         """
         self.enforce_dale = enforce_dale
+        self.constraint_info = None  # Will be populated by from_hetersynapse
         constraint = constraint.T
         constraint.eliminate_zeros()
         if not isinstance(constraint, scipy.sparse.coo_array):
@@ -383,3 +373,150 @@ class SparseConstrainedConn(BaseSparseConn, HasConstraint):
     def constrain(self, *args, **kwargs):
         if self.enforce_dale:
             self.magnitude.data = self.magnitude.relu()
+
+    @classmethod
+    def from_hetersynapse(
+        cls,
+        conn: scipy.sparse.sparray,
+        constraint: scipy.sparse.sparray,
+        receptor_type_index: pd.DataFrame,
+        enforce_dale: bool = True,
+        bias: torch.Tensor | None = None,
+        sparse_backend: SparseBackend | None = None,
+        device=None,
+        dtype=None,
+    ) -> "SparseConstrainedConn":
+        """Create from make_hetersynapse_constrained_conn() output.
+
+        Args:
+            conn: Connection sparse matrix from make_hetersynapse_constrained_conn
+            constraint: Constraint sparse matrix from make_hetersynapse_constrained_conn
+            receptor_type_index: DataFrame mapping receptor indices to receptor types
+            enforce_dale: If True, applies ReLU to enforce Dale's law
+            bias: Optional bias of shape (num_dst,)
+            sparse_backend: "native" or "torch_sparse"
+            device: Device to place tensors on
+            dtype: Data type for tensors
+
+        Returns:
+            SparseConstrainedConn instance with constraint_info populated
+        """
+        instance = cls(
+            conn=conn,
+            constraint=constraint,
+            enforce_dale=enforce_dale,
+            bias=bias,
+            sparse_backend=sparse_backend,
+            device=device,
+            dtype=dtype,
+        )
+        instance.constraint_info = {
+            "receptor_type_index": receptor_type_index,
+        }
+        return instance
+
+    def get_group_info(self, include_weights: bool = False) -> pd.DataFrame:
+        """Get information about each constraint group.
+
+        Args:
+            include_weights: If True, include mean weight statistics
+
+        Returns:
+            DataFrame with group_id, num_connections, current_magnitude,
+            and optionally receptor type info.
+        """
+        n_groups = len(self.magnitude)
+        group_info = []
+
+        for group_id in range(n_groups):
+            mask = self._constraint_scatter_indices == group_id
+            num_connections = mask.sum().item()
+            current_mag = self.magnitude[group_id].item()
+
+            info = {
+                "group_id": group_id,
+                "num_connections": num_connections,
+                "current_magnitude": current_mag,
+            }
+
+            if include_weights:
+                weights = self.initial_weight[mask]
+                info["mean_initial_weight"] = weights.mean().item()
+                # Use unbiased=False to avoid warning for single-element groups
+                info["std_initial_weight"] = weights.std(unbiased=False).item()
+
+            group_info.append(info)
+
+        df = pd.DataFrame(group_info)
+
+        # Add receptor type info if available
+        if self.constraint_info is not None:
+            receptor_idx = self.constraint_info["receptor_type_index"]
+            # Note: Constraint groups may not directly map to receptor indices
+            # This is a simple mapping that works when constraint_mode="full"
+            if len(receptor_idx) == n_groups:
+                df = pd.concat([df, receptor_idx.reset_index(drop=True)], axis=1)
+
+        return df
+
+    def set_group_magnitude(
+        self,
+        group_id: int | None = None,
+        receptor_pair: tuple[str, str] | None = None,
+        value: float | torch.Tensor = 1.0,
+    ):
+        """Set magnitude for a specific constraint group.
+
+        Args:
+            group_id: Zero-indexed group ID (mutually exclusive with receptor_pair)
+            receptor_pair: (pre_receptor, post_receptor) if created from hetersynapse
+                          (mutually exclusive with group_id)
+            value: Magnitude value to set
+        """
+        if (group_id is None) == (receptor_pair is None):
+            raise ValueError(
+                "Exactly one of group_id or receptor_pair must be specified"
+            )
+
+        if receptor_pair is not None:
+            if self.constraint_info is None:
+                raise ValueError(
+                    "receptor_pair can only be used if created via from_hetersynapse"
+                )
+            receptor_idx = self.constraint_info["receptor_type_index"]
+
+            # Check if neuron mode (has pre/post receptor types)
+            if "pre_receptor_type" in receptor_idx.columns:
+                pre_type, post_type = receptor_pair
+                idx = receptor_idx.set_index(
+                    ["pre_receptor_type", "post_receptor_type"]
+                )
+                group_id = idx.loc[(pre_type, post_type), "receptor_index"]
+            else:
+                raise ValueError(
+                    "receptor_pair requires neuron mode "
+                    "(pre_receptor_type, post_receptor_type)"
+                )
+
+        if isinstance(value, (int, float)):
+            value = torch.tensor(
+                value, dtype=self.magnitude.dtype, device=self.magnitude.device
+            )
+
+        self.magnitude.data[group_id] = value
+
+    def get_weights_by_group(self) -> dict[int, torch.Tensor]:
+        """Get actual weight values grouped by constraint group.
+
+        Returns:
+            Dict mapping group_id (0-indexed) to tensor of weights in that group.
+        """
+        n_groups = len(self.magnitude)
+        result = {}
+
+        for group_id in range(n_groups):
+            mask = self._constraint_scatter_indices == group_id
+            weights = self.initial_weight[mask] * self.magnitude[group_id]
+            result[group_id] = weights
+
+        return result

@@ -218,7 +218,9 @@ def make_hetersynapse_conn(
     connections: scipy.sparse.sparray | pd.DataFrame,
     receptor_type_col="EI",
     receptor_type_mode: Literal["neuron", "connection"] = "neuron",
-) -> tuple[scipy.sparse.sparray, pd.DataFrame]:
+    return_dict: bool = False,
+    dropna: Literal["error", "filter", "unknown"] = "error",
+) -> tuple[scipy.sparse.sparray, pd.DataFrame] | tuple[OrderedDict, pd.DataFrame]:
     """Transforms a connectivity matrix to represent heterosynaptic connections
     based on receptor types.
 
@@ -245,11 +247,19 @@ def make_hetersynapse_conn(
         DataFrame that specifies the receptor type.
         receptor_type_mode: Specifies whether receptor types are associated with
         'neuron' or 'connection'.
+        return_dict: If True, returns OrderedDict mapping receptor type pairs to
+        sparse matrices instead of a single stacked matrix.
+        dropna: How to handle NaN receptor types. Options:
+            - 'error' (default): Raise ValueError if NaN found
+            - 'filter': Remove connections involving NaN neurons
+              (preserves neuron count)
+            - 'unknown': Treat NaN as a separate receptor type category
 
     Returns:
         A tuple containing:
-            - The transformed sparse array (`scipy.sparse.sparray`) in
-              (pre_neuron, post_neuron * receptor_type).
+            - The transformed sparse array (`scipy.sparse.sparray`) or OrderedDict
+              of sparse arrays (if return_dict=True) in (pre_neuron,
+              post_neuron * receptor_type).
             - A DataFrame mapping the new rows to receptor types. For 'neuron'
               mode, this will include 'pre_receptor_type' and
               'post_receptor_type'. For 'connection' mode, it will just have
@@ -258,11 +268,13 @@ def make_hetersynapse_conn(
     Raises:
         ValueError: If `connections` is not a DataFrame or a sparse array, or if
                     the `receptor_type_mode` is 'connection' but the input is a
-                    sparse array.
-    """
+                    sparse array, or if NaN values found and dropna='error'.
 
-    # TODO: handle na values
-    # TODO: make this compatible with make_constraint_by_neuron_type
+    Note:
+        The neuron count is always preserved (based on simple_id indexing).
+        When dropna='filter', only connections are removed, not neurons.
+        When dropna='unknown', NaN becomes a valid receptor type.
+    """
 
     if isinstance(connections, pd.DataFrame):
         if receptor_type_mode == "neuron":
@@ -272,6 +284,8 @@ def make_hetersynapse_conn(
                 connections,
                 receptor_type_col,
                 receptor_type_mode,
+                return_dict=return_dict,
+                dropna=dropna,
             )
 
         # create sparse mat for each connection's receptor_type
@@ -285,6 +299,11 @@ def make_hetersynapse_conn(
             {k: make_sparse_mat(v, shape) for k, v in connections_groups.items()}
         )
         receptor_type_index = list(enumerate(conn_receptor_type_groups.keys()))
+        receptor_type_index = pd.DataFrame(
+            receptor_type_index, columns=["receptor_index", "receptor_type"]
+        )
+        if return_dict:
+            return conn_receptor_type_groups, receptor_type_index
         receptor_type_index_groups = list(enumerate(conn_receptor_type_groups.values()))
 
         n_receptor_type = len(conn_receptor_type_groups)
@@ -298,27 +317,76 @@ def make_hetersynapse_conn(
             new_col.append(conn_mat.col * n_receptor_type + i)
             new_val.append(conn_mat.data)
 
-        return scipy.sparse.coo_array(
-            (
-                np.concatenate(new_val),
-                (np.concatenate(new_row), np.concatenate(new_col)),
+        return (
+            scipy.sparse.coo_array(
+                (
+                    np.concatenate(new_val),
+                    (np.concatenate(new_row), np.concatenate(new_col)),
+                ),
+                shape=new_shape,
             ),
-            shape=new_shape,
-        ), pd.DataFrame(
-            receptor_type_index, columns=["receptor_index", "receptor_type"]
+            receptor_type_index,
         )
 
     elif isinstance(connections, scipy.sparse.sparray):
         assert receptor_type_mode == "neuron"
+
+        # Validate no NaN in connection data
         connections = connections.tocoo()
+        if np.isnan(connections.data).any():
+            raise ValueError("NaN values detected in connection matrix data")
+
         conn_mat_df = pd.DataFrame(
             {"pre": connections.row, "post": connections.col, "data": connections.data}
         )
         shape = connections.shape
 
+        # Check for NaN receptor types in neurons
+        nan_mask = neurons[receptor_type_col].isna()
+        if nan_mask.any():
+            if dropna == "error":
+                nan_neurons = neurons[nan_mask]["simple_id"].tolist()
+                raise ValueError(
+                    f"NaN receptor types found for neurons: {nan_neurons}. "
+                    "Set dropna='filter' to remove connections involving them, "
+                    "or dropna='unknown' to treat NaN as a separate receptor type."
+                )
+            elif dropna == "filter":
+                # Filter out connections involving NaN neurons
+                nan_neuron_ids = set(neurons[nan_mask]["simple_id"])
+                n_before = len(conn_mat_df)
+                conn_mat_df = conn_mat_df[
+                    ~conn_mat_df["pre"].isin(nan_neuron_ids)
+                    & ~conn_mat_df["post"].isin(nan_neuron_ids)
+                ]
+                n_filtered = n_before - len(conn_mat_df)
+                if n_filtered > 0:
+                    warnings.warn(
+                        f"Filtered out {n_filtered} connections involving "
+                        f"{len(nan_neuron_ids)} neurons with NaN receptor types"
+                    )
+            elif dropna == "unknown":
+                # Replace NaN with 'unknown' string to make it a valid category
+                neurons = neurons.copy()
+                neurons.loc[nan_mask, receptor_type_col] = "unknown"
+                warnings.warn(
+                    f"Treating {nan_mask.sum()} neurons with NaN receptor types "
+                    "as 'unknown' receptor type"
+                )
+            else:
+                raise ValueError(
+                    f"dropna must be 'error', 'filter', or 'unknown', got {dropna}"
+                )
+
+        # Group neurons by receptor type
+        # (NaN replaced with 'unknown' if dropna='unknown', filtered if dropna='filter')
         receptor_type_groups = OrderedDict(
             groupby_to_dict(
-                neurons, "simple_id", by=receptor_type_col, sort=True, dropna=False
+                neurons,
+                "simple_id",
+                by=receptor_type_col,
+                sort=True,
+                dropna=(dropna == "filter"),  # Only drop NaN groups if filtering
             )
         )
         receptor_type_groups = list(
@@ -332,6 +400,32 @@ def make_hetersynapse_conn(
 
         n_receptor_type = len(receptor_type_groups)
         new_shape = (shape[0], shape[1] * n_receptor_type)
+
+        if return_dict:
+            # Return dict mapping (pre_type, post_type) -> sparse matrix
+            result_dict = OrderedDict()
+            for i, (pre, post) in receptor_type_index_groups:
+                _, pre_group = pre
+                _, post_group = post
+                pre_k, _ = pre
+                post_k, _ = post
+
+                conn = conn_mat_df[
+                    conn_mat_df.pre.isin(pre_group) & conn_mat_df.post.isin(post_group)
+                ]
+
+                if len(conn) > 0:
+                    result_dict[(pre_k, post_k)] = scipy.sparse.coo_array(
+                        (conn.data.values, (conn.pre.values, conn.post.values)),
+                        shape=shape,
+                    )
+
+            return result_dict, pd.DataFrame(
+                receptor_type_index,
+                columns=["receptor_index", "pre_receptor_type", "post_receptor_type"],
+            )
+
+        # Default: return stacked matrix
         new_row = []
         new_col = []
         new_val = []
@@ -358,3 +452,322 @@ def make_hetersynapse_conn(
         )
     else:
         raise ValueError("connections must be a DataFrame or a scipy.sparse.sparray")
+
+
+def make_hetersynapse_constraint(
+    neurons: pd.DataFrame,
+    connections: pd.DataFrame,
+    cell_type_col: str = "cell_type",
+    receptor_type_col: str = "EI",
+    receptor_type_mode: Literal["neuron", "connection"] = "neuron",
+    constraint_mode: Literal["full", "cell_only", "cell_and_receptor"] = "full",
+    nan_in_same_group: bool = True,
+) -> scipy.sparse.sparray:
+    """Create constraint matrix for hetersynaptic connections grouped by cell
+    and receptor types.
+
+    Args:
+        neurons (pd.DataFrame): Must contain 'root_id', cell_type_col,
+            and receptor_type_col.
+        connections (pd.DataFrame): Must contain 'pre_root_id', 'post_root_id',
+            'pre_simple_id', and 'post_simple_id'.
+        cell_type_col: Column name for cell type information.
+        receptor_type_col: Column name for receptor type information.
+        receptor_type_mode: Whether receptor types are per 'neuron' or 'connection'.
+        constraint_mode:
+            - "full": Separate constraint for each (pre_cell_type, post_cell_type,
+                      pre_receptor, post_receptor) combination
+            - "cell_only": Same constraint for all receptor types with matching
+                           (pre_cell_type, post_cell_type)
+            - "cell_and_receptor": Constraint by (pre_cell_type, post_cell_type)
+                                   and whether it's E-E, E-I, I-E, or I-I
+        nan_in_same_group (bool): If True, missing cell types are grouped together.
+
+    Returns:
+        scipy.sparse.sparray: Sparse array matching heterosynapse connection shape,
+            where each non-zero value is a group ID for that connection.
+    """
+    # First get the basic cell type constraint
+    cell_constraint = make_constraint_by_neuron_type(
+        neurons, connections, nan_in_same_group=nan_in_same_group
+    )
+
+    if constraint_mode == "cell_only":
+        # Just use cell type constraints, replicate across all receptor types
+        # Get receptor type info to determine how many receptor pairs
+        conn_temp, receptor_idx = make_hetersynapse_conn(
+            neurons,
+            connections,
+            receptor_type_col,
+            receptor_type_mode,
+            return_dict=False,
+        )
+        n_receptor_pairs = len(receptor_idx)
+
+        # Replicate constraint for each receptor pair
+        cell_constraint = cell_constraint.tocoo()
+        new_row = []
+        new_col = []
+        new_val = []
+
+        for i in range(n_receptor_pairs):
+            new_row.append(cell_constraint.row)
+            new_col.append(cell_constraint.col * n_receptor_pairs + i)
+            new_val.append(cell_constraint.data)
+
+        return scipy.sparse.coo_array(
+            (
+                np.concatenate(new_val),
+                (np.concatenate(new_row), np.concatenate(new_col)),
+            ),
+            shape=(
+                cell_constraint.shape[0],
+                cell_constraint.shape[1] * n_receptor_pairs,
+            ),
+        )
+
+    # For "full" or "cell_and_receptor", need to expand with receptor type info
+    conn_mat, receptor_idx = make_hetersynapse_conn(
+        neurons, connections, receptor_type_col, receptor_type_mode, return_dict=False
+    )
+
+    # Build mapping from connection to cell type pair and receptor pair
+    tmp_neurons = neurons.copy()
+
+    if not nan_in_same_group:
+        none_mask = tmp_neurons[cell_type_col].isna()
+        tmp_neurons.loc[none_mask, cell_type_col] = [
+            f"__none_{i}__" for i in range(none_mask.sum())
+        ]
+
+    root_id_to_cell_type = dict(
+        tmp_neurons[["root_id", cell_type_col]].itertuples(index=False, name=None)
+    )
+
+    tmp_conns = connections.drop_duplicates(
+        subset=["pre_simple_id", "post_simple_id"]
+    ).copy()
+
+    tmp_conns["pre_cell_type"] = tmp_conns["pre_root_id"].map(root_id_to_cell_type)
+    tmp_conns["post_cell_type"] = tmp_conns["post_root_id"].map(root_id_to_cell_type)
+
+    # Get heterosynapse connection matrix to know the expanded structure
+    conn_mat = conn_mat.tocoo()
+
+    # Create DataFrame of connections in hetersynapse space
+    hetero_conn_df = pd.DataFrame(
+        {
+            "pre": conn_mat.row,
+            "post_hetero": conn_mat.col,
+        }
+    )
+
+    # Map back to original post neuron and receptor index
+    n_receptor_pairs = len(receptor_idx)
+    hetero_conn_df["post"] = hetero_conn_df["post_hetero"] // n_receptor_pairs
+    hetero_conn_df["receptor_idx"] = hetero_conn_df["post_hetero"] % n_receptor_pairs
+
+    # Merge with receptor type info
+    hetero_conn_df = hetero_conn_df.merge(
+        receptor_idx, left_on="receptor_idx", right_on="receptor_index", how="left"
+    )
+
+    # Merge with connection info to get cell types
+    original_conn_df = tmp_conns[
+        ["pre_simple_id", "post_simple_id", "pre_cell_type", "post_cell_type"]
+    ]
+    hetero_conn_df = hetero_conn_df.merge(
+        original_conn_df,
+        left_on=["pre", "post"],
+        right_on=["pre_simple_id", "post_simple_id"],
+        how="left",
+    )
+
+    if constraint_mode == "full":
+        # Each (pre_cell_type, post_cell_type, pre_receptor, post_receptor)
+        # gets unique ID
+        if receptor_type_mode == "neuron":
+            constraint_key = hetero_conn_df[
+                [
+                    "pre_cell_type",
+                    "post_cell_type",
+                    "pre_receptor_type",
+                    "post_receptor_type",
+                ]
+            ].agg(tuple, axis=1)
+        else:
+            constraint_key = hetero_conn_df[
+                ["pre_cell_type", "post_cell_type", "receptor_type"]
+            ].agg(tuple, axis=1)
+    else:  # "cell_and_receptor"
+        # Group by cell type and receptor category (E-E, E-I, I-E, I-I)
+        if receptor_type_mode == "neuron":
+            hetero_conn_df["receptor_category"] = (
+                hetero_conn_df["pre_receptor_type"].astype(str)
+                + "-"
+                + hetero_conn_df["post_receptor_type"].astype(str)
+            )
+        else:
+            hetero_conn_df["receptor_category"] = hetero_conn_df["receptor_type"]
+
+        constraint_key = hetero_conn_df[
+            ["pre_cell_type", "post_cell_type", "receptor_category"]
+        ].agg(tuple, axis=1)
+
+    hetero_conn_df["constraint_group_id"] = pd.factorize(constraint_key)[0] + 1
+
+    return scipy.sparse.coo_array(
+        (
+            hetero_conn_df["constraint_group_id"].values,
+            (hetero_conn_df["pre"].values, hetero_conn_df["post_hetero"].values),
+        ),
+        shape=conn_mat.shape,
+    )
+
+
+def make_hetersynapse_constrained_conn(
+    neurons: pd.DataFrame,
+    connections: pd.DataFrame,
+    cell_type_col: str = "cell_type",
+    receptor_type_col: str = "EI",
+    receptor_type_mode: Literal["neuron", "connection"] = "neuron",
+    constraint_mode: Literal["full", "cell_only", "cell_and_receptor"] = "full",
+    nan_in_same_group: bool = True,
+    dropna: Literal["error", "filter", "unknown"] = "error",
+) -> tuple[scipy.sparse.sparray, scipy.sparse.sparray, pd.DataFrame]:
+    """Create both heterosynaptic connection and constraint matrices.
+
+    This is a convenience function that combines make_hetersynapse_conn and
+    make_hetersynapse_constraint to produce outputs ready for SparseConstrainedConn.
+
+    Args:
+        neurons (pd.DataFrame): Must contain 'root_id', cell_type_col,
+            and receptor_type_col.
+        connections (pd.DataFrame): Must contain 'pre_root_id', 'post_root_id',
+            'pre_simple_id', and 'post_simple_id'.
+        cell_type_col: Column name for cell type information.
+        receptor_type_col: Column name for receptor type information.
+        receptor_type_mode: Whether receptor types are per 'neuron' or
+            'connection'.
+        constraint_mode: Controls constraint granularity (see
+            make_hetersynapse_constraint).
+        nan_in_same_group (bool): If True, missing cell types are grouped together.
+        dropna: How to handle NaN receptor types ('error', 'filter', or 'unknown').
+
+    Returns:
+        Tuple of (conn_matrix, constraint_matrix, receptor_type_index).
+        Can be used directly with SparseConstrainedConn.from_hetersynapse(
+            conn, constraint, receptor_idx
+        ).
+    """
+    conn_mat, receptor_idx = make_hetersynapse_conn(
+        neurons,
+        connections,
+        receptor_type_col=receptor_type_col,
+        receptor_type_mode=receptor_type_mode,
+        return_dict=False,
+        dropna=dropna,
+    )
+
+    constraint_mat = make_hetersynapse_constraint(
+        neurons,
+        connections,
+        cell_type_col=cell_type_col,
+        receptor_type_col=receptor_type_col,
+        receptor_type_mode=receptor_type_mode,
+        constraint_mode=constraint_mode,
+        nan_in_same_group=nan_in_same_group,
+    )
+
+    return conn_mat, constraint_mat, receptor_idx
+
+
+def stack_hetersynapse_dict(
+    conn_dict: dict,
+    receptor_type_index: pd.DataFrame,
+) -> scipy.sparse.sparray:
+    """Convert dict of receptor-specific matrices back to stacked matrix
+    format.
+
+    This is the inverse of make_hetersynapse_conn with return_dict=True.
+    Useful after modifying individual receptor type matrices.
+
+    Args:
+        conn_dict: OrderedDict mapping receptor type pairs to sparse matrices.
+            Keys are (pre_receptor, post_receptor) tuples for neuron mode,
+            or receptor_type strings for connection mode.
+        receptor_type_index: DataFrame with receptor type mappings, must
+            include 'receptor_index' column and either
+            ('pre_receptor_type', 'post_receptor_type') for neuron mode
+            or 'receptor_type' for connection mode.
+
+    Returns:
+        Stacked sparse matrix in (pre_neuron, post_neuron * n_receptor_types) format.
+
+    Example:
+        >>> # Get dict, modify matrices, then stack back
+        >>> conn_dict, receptor_idx = make_hetersynapse_conn(
+        ...     neurons, connections, return_dict=True
+        ... )
+        >>> # Modify E->I connections
+        >>> conn_dict[('E', 'I')].data *= 2.0
+        >>> # Convert back to stacked format
+        >>> conn_stacked = stack_hetersynapse_dict(conn_dict, receptor_idx)
+    """
+    if len(conn_dict) == 0:
+        raise ValueError("conn_dict is empty")
+
+    # Get the shape from the first matrix
+    first_mat = next(iter(conn_dict.values()))
+    base_shape = first_mat.shape
+    n_receptor_pairs = len(receptor_type_index)
+
+    # Detect mode from receptor_type_index columns
+    has_pre_post = (
+        "pre_receptor_type" in receptor_type_index.columns
+        and "post_receptor_type" in receptor_type_index.columns
+    )
+
+    new_shape = (base_shape[0], base_shape[1] * n_receptor_pairs)
+    new_row = []
+    new_col = []
+    new_val = []
+
+    # Build mapping from receptor pair to index
+    if has_pre_post:
+        # Neuron mode
+        receptor_to_idx = {}
+        for _, row in receptor_type_index.iterrows():
+            key = (row["pre_receptor_type"], row["post_receptor_type"])
+            receptor_to_idx[key] = row["receptor_index"]
+
+        for (pre_type, post_type), mat in conn_dict.items():
+            idx = receptor_to_idx[(pre_type, post_type)]
+            mat = mat.tocoo()
+
+            new_row.append(mat.row)
+            new_col.append(mat.col * n_receptor_pairs + idx)
+            new_val.append(mat.data)
+    else:
+        # Connection mode
+        receptor_to_idx = dict(
+            receptor_type_index[["receptor_type", "receptor_index"]].itertuples(
+                index=False, name=None
+            )
+        )
+
+        for receptor_type, mat in conn_dict.items():
+            idx = receptor_to_idx[receptor_type]
+            mat = mat.tocoo()
+
+            new_row.append(mat.row)
+            new_col.append(mat.col * n_receptor_pairs + idx)
+            new_val.append(mat.data)
+
+    return scipy.sparse.coo_array(
+        (
+            np.concatenate(new_val),
+            (np.concatenate(new_row), np.concatenate(new_col)),
+        ),
+        shape=new_shape,
+    )

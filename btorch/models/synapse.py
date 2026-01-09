@@ -1,6 +1,7 @@
 from collections.abc import Iterable, Sequence
 from typing import Protocol
 
+import pandas as pd
 import torch
 
 from . import environ
@@ -381,6 +382,7 @@ class HeterSynapsePSC(BasePSC):
         self,
         n_neuron: int | Sequence[int],
         n_receptor: int,
+        receptor_type_index: pd.DataFrame,
         linear: torch.nn.Module,
         base_psc: type[BasePSC] = AlphaPSC,
         step_mode="s",
@@ -399,9 +401,82 @@ class HeterSynapsePSC(BasePSC):
             **kwargs,
         )
         self.n_receptor = n_receptor
+        self.receptor_type_index = (
+            receptor_type_index  # Store as-is, get_psc will handle indexing
+        )
 
     def single_step_forward(self, z: torch.Tensor):
         z_flat, leading = self._flatten_neuron(z)
         psc = self.base_psc.single_step_forward(z_flat)
         self.psc = psc.view(*psc.shape[:-1], *self.n_neuron, self.n_receptor).sum(-1)
         return self.psc
+
+    def get_psc(
+        self,
+        receptor_type: int | str | tuple[str, str] | None = None,
+        psc: torch.Tensor | None = None,
+        validate_nan: bool = True,
+    ):
+        """Get PSC for specific receptor type(s).
+
+        Mode is automatically detected from receptor_type_index columns:
+        - neuron mode: has 'pre_receptor_type' and 'post_receptor_type'
+        - connection mode: has only 'receptor_type'
+
+        Args:
+            receptor_type:
+                - None: return summed PSC across all receptor types
+                - int: receptor index
+                - str: receptor type name (connection mode only)
+                - tuple[str, str]: (pre_type, post_type) pair (neuron mode only)
+            psc: Optional PSC tensor to query, defaults to self.base_psc.psc
+            validate_nan: If True, raise error if NaN values detected
+
+        Returns:
+            PSC tensor for the specified receptor type(s).
+        """
+        psc = psc if psc is not None else self.base_psc.psc
+
+        if receptor_type is None:
+            result = psc
+        else:
+            # Autodetect mode from receptor_type_index columns
+            has_pre_post = (
+                "pre_receptor_type" in self.receptor_type_index.columns
+                and "post_receptor_type" in self.receptor_type_index.columns
+            )
+
+            if isinstance(receptor_type, tuple):
+                # Must be neuron mode
+                if not has_pre_post:
+                    raise ValueError(
+                        "Tuple receptor_type requires neuron mode "
+                        "(receptor_type_index must have 'pre_receptor_type' and "
+                        "'post_receptor_type' columns)"
+                    )
+                pre_type, post_type = receptor_type
+                idx = self.receptor_type_index.set_index(
+                    ["pre_receptor_type", "post_receptor_type"]
+                )
+                receptor_idx = idx.loc[(pre_type, post_type), "receptor_index"]
+            elif isinstance(receptor_type, str):
+                # String lookup - mode depends on columns
+                if has_pre_post:
+                    raise ValueError(
+                        "String receptor_type not supported in neuron mode. "
+                        "Use tuple (pre_receptor_type, post_receptor_type) instead."
+                    )
+                idx = self.receptor_type_index.set_index("receptor_type")
+                receptor_idx = idx.loc[receptor_type, "receptor_index"]
+            else:
+                # Integer index
+                receptor_idx = int(receptor_type)
+
+            result = psc.view(*psc.shape[:-1], *self.n_neuron, self.n_receptor)[
+                ..., receptor_idx
+            ]
+
+        if validate_nan and torch.isnan(result).any():
+            raise ValueError("NaN values detected in PSC tensor")
+
+        return result
