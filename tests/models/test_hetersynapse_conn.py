@@ -536,7 +536,7 @@ def test_stack_hetersynapse_dict():
     This demonstrates the round-trip conversion and allows for
     modification of individual receptor type matrices before stacking.
     """
-    from btorch.connectome.connection import stack_hetersynapse_dict
+    from btorch.connectome.connection import stack_hetersynapse
 
     neurons = create_test_neurons(n_neurons=40)
     connections = create_test_connections(neurons, density=0.15)
@@ -560,7 +560,7 @@ def test_stack_hetersynapse_dict():
     )
 
     # Convert dict back to stacked
-    conn_stacked = stack_hetersynapse_dict(conn_dict, receptor_idx)
+    conn_stacked = stack_hetersynapse(conn_dict, receptor_idx)
 
     # Should match the reference
     assert conn_stacked.shape == conn_stacked_ref.shape
@@ -588,7 +588,7 @@ def test_stack_hetersynapse_dict():
     if ("E", "I") in conn_dict_modified:
         conn_dict_modified[("E", "I")].data *= 2.0
 
-    conn_stacked_modified = stack_hetersynapse_dict(conn_dict_modified, receptor_idx)
+    conn_stacked_modified = stack_hetersynapse(conn_dict_modified, receptor_idx)
 
     # The modified matrix should be different
     conn_stacked_modified = conn_stacked_modified.tocsr()

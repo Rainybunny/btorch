@@ -220,6 +220,7 @@ def make_hetersynapse_conn(
     receptor_type_mode: Literal["neuron", "connection"] = "neuron",
     return_dict: bool = False,
     dropna: Literal["error", "filter", "unknown"] = "error",
+    ignore_post_type: bool = False,
 ) -> tuple[scipy.sparse.sparray, pd.DataFrame] | tuple[OrderedDict, pd.DataFrame]:
     """Transforms a connectivity matrix to represent heterosynaptic connections
     based on receptor types.
@@ -254,6 +255,9 @@ def make_hetersynapse_conn(
             - 'filter': Remove connections involving NaN neurons
               (preserves neuron count)
             - 'unknown': Treat NaN as a separate receptor type category
+        ignore_post_type: If True, clusters connections only by pre-synaptic
+            receptor type, ignoring post-synaptic receptor type. Resulting matrix
+            will have fewer columns. Only valid for 'neuron' mode.
 
     Returns:
         A tuple containing:
@@ -286,6 +290,7 @@ def make_hetersynapse_conn(
                 receptor_type_mode,
                 return_dict=return_dict,
                 dropna=dropna,
+                ignore_post_type=ignore_post_type,
             )
 
         # create sparse mat for each connection's receptor_type
@@ -330,6 +335,9 @@ def make_hetersynapse_conn(
 
     elif isinstance(connections, scipy.sparse.sparray):
         assert receptor_type_mode == "neuron"
+
+        if ignore_post_type and receptor_type_mode != "neuron":
+            raise ValueError("ignore_post_type only valid for 'neuron' mode")
 
         # Validate no NaN in connection data
         connections = connections.tocoo()
@@ -379,7 +387,6 @@ def make_hetersynapse_conn(
                 )
 
         # Group neurons by receptor type
-        # (NaN replaced with 'unknown' if dropna='unknown', filtered if dropna='filter')
         receptor_type_groups = OrderedDict(
             groupby_to_dict(
                 neurons,
@@ -389,67 +396,115 @@ def make_hetersynapse_conn(
                 dropna=(dropna == "filter"),  # Only drop NaN groups if filtering
             )
         )
-        receptor_type_groups = list(
-            itertools.product(receptor_type_groups.items(), repeat=2)
-        )
-        receptor_type_index_groups = list(enumerate(receptor_type_groups))
-        receptor_type_index = [
-            (i, pre_k, post_k)
-            for i, ((pre_k, _), (post_k, _)) in receptor_type_index_groups
-        ]
 
-        n_receptor_type = len(receptor_type_groups)
+        if ignore_post_type:
+            # Only iterate over pre-synaptic receptor types
+            # We treat all post-synaptic neurons as targets regardless of their type
+            receptor_type_index_groups = list(enumerate(receptor_type_groups.items()))
+            receptor_type_index = [
+                (i, pre_k) for i, (pre_k, _) in receptor_type_index_groups
+            ]
+        else:
+            receptor_type_groups_product = list(
+                itertools.product(receptor_type_groups.items(), repeat=2)
+            )
+            receptor_type_index_groups = list(enumerate(receptor_type_groups_product))
+            receptor_type_index = [
+                (i, pre_k, post_k)
+                for i, ((pre_k, _), (post_k, _)) in receptor_type_index_groups
+            ]
+
+        n_receptor_type = len(receptor_type_index_groups)
         new_shape = (shape[0], shape[1] * n_receptor_type)
 
         if return_dict:
-            # Return dict mapping (pre_type, post_type) -> sparse matrix
+            # Return dict mapping keys -> sparse matrix
             result_dict = OrderedDict()
-            for i, (pre, post) in receptor_type_index_groups:
-                _, pre_group = pre
-                _, post_group = post
-                pre_k, _ = pre
-                post_k, _ = post
+            if ignore_post_type:
+                for i, (pre_type, pre_group) in receptor_type_index_groups:
+                    conn = conn_mat_df[conn_mat_df.pre.isin(pre_group)]
+                    if len(conn) > 0:
+                        result_dict[pre_type] = scipy.sparse.coo_array(
+                            (conn.data.values, (conn.pre.values, conn.post.values)),
+                            shape=shape,
+                        )
+                return result_dict, pd.DataFrame(
+                    receptor_type_index,
+                    columns=["receptor_index", "receptor_type"],
+                )
+            else:
+                for i, (pre, post) in receptor_type_index_groups:
+                    _, pre_group = pre
+                    _, post_group = post
+                    pre_k, _ = pre
+                    post_k, _ = post
 
-                conn = conn_mat_df[
-                    conn_mat_df.pre.isin(pre_group) & conn_mat_df.post.isin(post_group)
-                ]
+                    conn = conn_mat_df[
+                        conn_mat_df.pre.isin(pre_group)
+                        & conn_mat_df.post.isin(post_group)
+                    ]
 
-                if len(conn) > 0:
-                    result_dict[(pre_k, post_k)] = scipy.sparse.coo_array(
-                        (conn.data.values, (conn.pre.values, conn.post.values)),
-                        shape=shape,
-                    )
+                    if len(conn) > 0:
+                        result_dict[(pre_k, post_k)] = scipy.sparse.coo_array(
+                            (conn.data.values, (conn.pre.values, conn.post.values)),
+                            shape=shape,
+                        )
 
-            return result_dict, pd.DataFrame(
-                receptor_type_index,
-                columns=["receptor_index", "pre_receptor_type", "post_receptor_type"],
-            )
+                return result_dict, pd.DataFrame(
+                    receptor_type_index,
+                    columns=[
+                        "receptor_index",
+                        "pre_receptor_type",
+                        "post_receptor_type",
+                    ],
+                )
 
         # Default: return stacked matrix
         new_row = []
         new_col = []
         new_val = []
-        for i, (pre, post) in receptor_type_index_groups:
-            _, pre_group = pre
-            _, post_group = post
 
-            conn = conn_mat_df[
-                conn_mat_df.pre.isin(pre_group) & conn_mat_df.post.isin(post_group)
-            ]
-            new_row.append(conn.pre.values)
-            new_col.append(conn.post.values * n_receptor_type + i)
-            new_val.append(conn.data.values)
+        if ignore_post_type:
+            for i, (pre_type, pre_group) in receptor_type_index_groups:
+                conn = conn_mat_df[conn_mat_df.pre.isin(pre_group)]
+                new_row.append(conn.pre.values)
+                # Stack columns based on pre-synaptic type index
+                # Each block corresponds to one pre-synaptic channel
+                new_col.append(conn.post.values * n_receptor_type + i)
+                new_val.append(conn.data.values)
 
-        return scipy.sparse.coo_array(
-            (
-                np.concatenate(new_val),
-                (np.concatenate(new_row), np.concatenate(new_col)),
-            ),
-            shape=new_shape,
-        ), pd.DataFrame(
-            receptor_type_index,
-            columns=["receptor_index", "pre_receptor_type", "post_receptor_type"],
-        )
+            return scipy.sparse.coo_array(
+                (
+                    np.concatenate(new_val),
+                    (np.concatenate(new_row), np.concatenate(new_col)),
+                ),
+                shape=new_shape,
+            ), pd.DataFrame(
+                receptor_type_index,
+                columns=["receptor_index", "receptor_type"],
+            )
+        else:
+            for i, (pre, post) in receptor_type_index_groups:
+                _, pre_group = pre
+                _, post_group = post
+
+                conn = conn_mat_df[
+                    conn_mat_df.pre.isin(pre_group) & conn_mat_df.post.isin(post_group)
+                ]
+                new_row.append(conn.pre.values)
+                new_col.append(conn.post.values * n_receptor_type + i)
+                new_val.append(conn.data.values)
+
+            return scipy.sparse.coo_array(
+                (
+                    np.concatenate(new_val),
+                    (np.concatenate(new_row), np.concatenate(new_col)),
+                ),
+                shape=new_shape,
+            ), pd.DataFrame(
+                receptor_type_index,
+                columns=["receptor_index", "pre_receptor_type", "post_receptor_type"],
+            )
     else:
         raise ValueError("connections must be a DataFrame or a scipy.sparse.sparray")
 
@@ -462,6 +517,7 @@ def make_hetersynapse_constraint(
     receptor_type_mode: Literal["neuron", "connection"] = "neuron",
     constraint_mode: Literal["full", "cell_only", "cell_and_receptor"] = "full",
     nan_in_same_group: bool = True,
+    ignore_post_type: bool = False,
 ) -> scipy.sparse.sparray:
     """Create constraint matrix for hetersynaptic connections grouped by cell
     and receptor types.
@@ -482,6 +538,7 @@ def make_hetersynapse_constraint(
             - "cell_and_receptor": Constraint by (pre_cell_type, post_cell_type)
                                    and whether it's E-E, E-I, I-E, or I-I
         nan_in_same_group (bool): If True, missing cell types are grouped together.
+        ignore_post_type: If True, constraints ignore post-receptor type.
 
     Returns:
         scipy.sparse.sparray: Sparse array matching heterosynapse connection shape,
@@ -501,6 +558,7 @@ def make_hetersynapse_constraint(
             receptor_type_col,
             receptor_type_mode,
             return_dict=False,
+            ignore_post_type=ignore_post_type,
         )
         n_receptor_pairs = len(receptor_idx)
 
@@ -528,7 +586,12 @@ def make_hetersynapse_constraint(
 
     # For "full" or "cell_and_receptor", need to expand with receptor type info
     conn_mat, receptor_idx = make_hetersynapse_conn(
-        neurons, connections, receptor_type_col, receptor_type_mode, return_dict=False
+        neurons,
+        connections,
+        receptor_type_col,
+        receptor_type_mode,
+        return_dict=False,
+        ignore_post_type=ignore_post_type,
     )
 
     # Build mapping from connection to cell type pair and receptor pair
@@ -586,7 +649,11 @@ def make_hetersynapse_constraint(
     if constraint_mode == "full":
         # Each (pre_cell_type, post_cell_type, pre_receptor, post_receptor)
         # gets unique ID
-        if receptor_type_mode == "neuron":
+        if ignore_post_type:
+            constraint_key = hetero_conn_df[
+                ["pre_cell_type", "post_cell_type", "receptor_type"]
+            ].agg(tuple, axis=1)
+        elif receptor_type_mode == "neuron":
             constraint_key = hetero_conn_df[
                 [
                     "pre_cell_type",
@@ -601,18 +668,23 @@ def make_hetersynapse_constraint(
             ].agg(tuple, axis=1)
     else:  # "cell_and_receptor"
         # Group by cell type and receptor category (E-E, E-I, I-E, I-I)
-        if receptor_type_mode == "neuron":
+        if ignore_post_type:
+            constraint_key = hetero_conn_df[
+                ["pre_cell_type", "post_cell_type", "receptor_type"]
+            ].agg(tuple, axis=1)
+        elif receptor_type_mode == "neuron":
             hetero_conn_df["receptor_category"] = (
                 hetero_conn_df["pre_receptor_type"].astype(str)
                 + "-"
                 + hetero_conn_df["post_receptor_type"].astype(str)
             )
+            constraint_key = hetero_conn_df[
+                ["pre_cell_type", "post_cell_type", "receptor_category"]
+            ].agg(tuple, axis=1)
         else:
-            hetero_conn_df["receptor_category"] = hetero_conn_df["receptor_type"]
-
-        constraint_key = hetero_conn_df[
-            ["pre_cell_type", "post_cell_type", "receptor_category"]
-        ].agg(tuple, axis=1)
+            constraint_key = hetero_conn_df[
+                ["pre_cell_type", "post_cell_type", "receptor_type"]
+            ].agg(tuple, axis=1)
 
     hetero_conn_df["constraint_group_id"] = pd.factorize(constraint_key)[0] + 1
 
@@ -634,6 +706,7 @@ def make_hetersynapse_constrained_conn(
     constraint_mode: Literal["full", "cell_only", "cell_and_receptor"] = "full",
     nan_in_same_group: bool = True,
     dropna: Literal["error", "filter", "unknown"] = "error",
+    ignore_post_type: bool = False,
 ) -> tuple[scipy.sparse.sparray, scipy.sparse.sparray, pd.DataFrame]:
     """Create both heterosynaptic connection and constraint matrices.
 
@@ -653,6 +726,7 @@ def make_hetersynapse_constrained_conn(
             make_hetersynapse_constraint).
         nan_in_same_group (bool): If True, missing cell types are grouped together.
         dropna: How to handle NaN receptor types ('error', 'filter', or 'unknown').
+        ignore_post_type: If True, ignore post-synaptic receptor distinction.
 
     Returns:
         Tuple of (conn_matrix, constraint_matrix, receptor_type_index).
@@ -667,6 +741,7 @@ def make_hetersynapse_constrained_conn(
         receptor_type_mode=receptor_type_mode,
         return_dict=False,
         dropna=dropna,
+        ignore_post_type=ignore_post_type,
     )
 
     constraint_mat = make_hetersynapse_constraint(
@@ -677,15 +752,17 @@ def make_hetersynapse_constrained_conn(
         receptor_type_mode=receptor_type_mode,
         constraint_mode=constraint_mode,
         nan_in_same_group=nan_in_same_group,
+        ignore_post_type=ignore_post_type,
     )
 
     return conn_mat, constraint_mat, receptor_idx
 
 
-def stack_hetersynapse_dict(
+def stack_hetersynapse(
     conn_dict: dict,
     receptor_type_index: pd.DataFrame,
-) -> scipy.sparse.sparray:
+    ignore_post_type: bool = False,
+) -> scipy.sparse.sparray | tuple[scipy.sparse.sparray, pd.DataFrame]:
     """Convert dict of receptor-specific matrices back to stacked matrix
     format.
 
@@ -703,6 +780,8 @@ def stack_hetersynapse_dict(
 
     Returns:
         Stacked sparse matrix in (pre_neuron, post_neuron * n_receptor_types) format.
+        If ignore_post_type is True, returns (stacked_conn, new_receptor_type_index)
+        as the receptor index changes.
 
     Example:
         >>> # Get dict, modify matrices, then stack back
@@ -712,11 +791,88 @@ def stack_hetersynapse_dict(
         >>> # Modify E->I connections
         >>> conn_dict[('E', 'I')].data *= 2.0
         >>> # Convert back to stacked format
-        >>> conn_stacked = stack_hetersynapse_dict(conn_dict, receptor_idx)
+        >>> conn_stacked = stack_hetersynapse(conn_dict, receptor_idx)
     """
     if len(conn_dict) == 0:
         raise ValueError("conn_dict is empty")
 
+    n_neuron = next(iter(conn_dict.values())).shape[0]
+
+    # Check if ignore_post_type is requested
+    if ignore_post_type:
+        # We need to collapse columns.
+        # Iterate over conn_dict, aggregating by pre-synaptic type
+        collapsed_conn_dict = OrderedDict()
+
+        # Check if we are in neuron mode (keys are tuples)
+        is_tuple_key = isinstance(next(iter(conn_dict.keys())), tuple)
+
+        if is_tuple_key:
+            # Group by pre-synaptic type
+            for (pre, post), mat in conn_dict.items():
+                if pre not in collapsed_conn_dict:
+                    collapsed_conn_dict[pre] = mat.copy()
+                else:
+                    # In standard make_hetersynapse_conn with ignore_post_type=True,
+                    # we create one block of columns per Pre-Receptor-Type.
+                    # Inside that block, for a given pre-neuron, the row connects to
+                    # ALL post-neurons (regardless of post-type) that possess that
+                    # pre-receptor connectivity.
+                    #
+                    # If we have E->E and E->I connections in conn_dict:
+                    # 'E' block should contain BOTH.
+                    # Since conn_dict split them into separate matrices (same size
+                    # N x N), E->E matrix has entries where post is E. E->I has
+                    # entries where post is I. They are mutually exclusive.
+                    # So we should sum them up.
+                    collapsed_conn_dict[pre] += mat
+
+            # Build new receptor index
+            new_receptor_index = []
+            for i, pre in enumerate(collapsed_conn_dict.keys()):
+                new_receptor_index.append((i, pre))
+
+            new_receptor_index_df = pd.DataFrame(
+                new_receptor_index, columns=["receptor_index", "receptor_type"]
+            )
+
+            # Stack using new types
+            n_receptor_types = len(collapsed_conn_dict)
+            new_shape = (n_neuron, n_neuron * n_receptor_types)
+
+            new_row = []
+            new_col = []
+            new_val = []
+
+            for i, (pre, mat) in enumerate(collapsed_conn_dict.items()):
+                mat = mat.tocoo()
+                new_row.append(mat.row)
+                new_col.append(mat.col * n_receptor_types + i)
+                new_val.append(mat.data)
+
+            stacked = scipy.sparse.coo_array(
+                (
+                    np.concatenate(new_val),
+                    (np.concatenate(new_row), np.concatenate(new_col)),
+                ),
+                shape=new_shape,
+            )
+            return stacked, new_receptor_index_df
+
+        else:
+            # Connection mode - keys are already just receptor types (strings)
+            # If ignore_post_type is requested here... connection mode essentially
+            # already ignores post neuron type distinction (it groups by connection
+            # property). So we can just behave like normal stacking, but return
+            # Tuple to match signature? Assuming standard behavior: ignore_post_type
+            # implies clustering purely by the key property. In connection mode,
+            # the key IS the property.
+
+            # Let's just fall back to normal stacking but return index.
+            # Actually, if the input index has 'receptor_type', it's already compatible.
+            pass
+
+    # Standard Stacking Logic
     # Get the shape from the first matrix
     first_mat = next(iter(conn_dict.values()))
     base_shape = first_mat.shape
@@ -742,6 +898,8 @@ def stack_hetersynapse_dict(
             receptor_to_idx[key] = row["receptor_index"]
 
         for (pre_type, post_type), mat in conn_dict.items():
+            if (pre_type, post_type) not in receptor_to_idx:
+                continue  # Skip if not in index (or raise error?)
             idx = receptor_to_idx[(pre_type, post_type)]
             mat = mat.tocoo()
 

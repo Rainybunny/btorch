@@ -34,3 +34,5 @@ site/
 /local/
 /metadata/md5-cache
 /tags
+
+.agent/rules/env.md
