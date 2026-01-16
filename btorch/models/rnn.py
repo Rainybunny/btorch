@@ -17,7 +17,9 @@ class RecurrentNNAbstract(base.MemoryModule):
         self,
         update_state_names: Sequence[str] | None = None,
         step_mode="m",
-        unroll: int | bool = 8,  # Changed: now accepts False
+        unroll: int | bool = 8,
+        chunk_size: int | None = None,
+        cpu_offload: bool = False,
         grad_checkpoint: bool = False,
         save_grad_history: bool = False,
         grad_state_names: Sequence[str] | None = None,
@@ -26,6 +28,8 @@ class RecurrentNNAbstract(base.MemoryModule):
         self.step_mode = step_mode
         self.update_state_names = update_state_names
         self.unroll = unroll
+        self.chunk_size = chunk_size
+        self.cpu_offload = cpu_offload
         self.grad_checkpoint = grad_checkpoint
         self.save_grad_history = save_grad_history
         self.grad_state_names = grad_state_names
@@ -85,15 +89,17 @@ class RecurrentNNAbstract(base.MemoryModule):
         if tensor.requires_grad:
             tensor.register_hook(grad_hook)
 
-    def _multi_step_forward_unrolled(self, *args, loop_args=(0,), **kwargs):
-        """Unrolled inner loop for checkpoint.
+    def _process_small_chunk(
+        self, *args, loop_args=(0,), unroll_steps: int = 1, **kwargs
+    ):
+        """Inner loop for processing a small chunk.
 
-        IMPORTANT: This function now returns lists (not stacked tensors):
-            - z_seq: list[Tensor] (length = block length)
-            - states_seq: dict[str, list[Tensor]] where each list length = block length
-
-        Stacking into a single tensor is done once by the caller (multi_step_forward).
+        Returns:
+            - z_seq: list[Tensor]
+            - states_seq: dict[str, list[Tensor]]
         """
+        # Determine actual number of steps for this small chunk (might be remainder)
+        # However, args are already sliced to the correct size by caller.
         T = args[loop_args[0]].shape[0]
         z_seq = []
         states_seq = {}
@@ -105,27 +111,69 @@ class RecurrentNNAbstract(base.MemoryModule):
             for k, v in states.items():
                 states_seq.setdefault(k, []).append(v)
 
-        # Note: don't stack here. Return lists so caller stacks once at the end.
         return z_seq, states_seq
 
-    # --- helper: checkpointed execution of a block ---
-    def _checkpointed_block_fn(self, *block_args, loop_args=(0,), **kwargs):
+    @partial(torch.compiler.disable, recursive=False)
+    def _process_large_chunk_impl(
+        self, *chunk_args, loop_args=(0,), unroll_size=1, **kwargs
+    ):
+        """Process a large chunk by splitting it into small unroll blocks.
+
+        This function is NOT checkpointed itself, but is the body of the
+        checkpoint.
+        """
+        T_chunk = chunk_args[loop_args[0]].shape[0]
+
+        # Calculate number of small blocks
+        num_blocks = (T_chunk + unroll_size - 1) // unroll_size
+
+        chunk_z = []
+        chunk_states = {}
+
+        for i in range(num_blocks):
+            start = i * unroll_size
+            end = min(start + unroll_size, T_chunk)
+
+            # Slice args for small chunk
+            sub_indices = slice(start, end)
+            sub_args = self._slice_args(chunk_args, loop_args, sub_indices)
+
+            # Process small chunk
+            z_sub, states_sub = self._process_small_chunk(
+                *sub_args, loop_args=loop_args, unroll_steps=end - start, **kwargs
+            )
+
+            chunk_z.extend(z_sub)
+            for k, v in states_sub.items():
+                chunk_states.setdefault(k, []).extend(v)
+
+        return chunk_z, chunk_states
+
+    def _checkpointed_large_chunk(
+        self,
+        *chunk_args,
+        loop_args=(0,),
+        unroll_size=1,
+        **kwargs,
+    ):
         memories = named_hidden_states(self)
         env = environ.all()
 
         def _pure(env, memories, *inner_args):
             set_hidden_states(self, memories)
             with environ.context(**env):
-                return self._multi_step_forward_unrolled(
-                    *inner_args, loop_args=loop_args, **kwargs
+                return self._process_large_chunk_impl(
+                    *inner_args,
+                    loop_args=loop_args,
+                    unroll_size=unroll_size,
+                    **kwargs,
                 )
 
-        return checkpoint(_pure, env, memories, *block_args, use_reentrant=False)
+        return checkpoint(_pure, env, memories, *chunk_args, use_reentrant=False)
 
     @partial(torch.compiler.disable, recursive=False)
     def multi_step_forward(self, *args, loop_args=None, **kwargs):
-        """Unified implementation for unroll=False and unroll=int."""
-
+        """Unified implementation for chunked unrolling and CPU offloading."""
         # Reset gradient history
         if self.save_grad_history:
             self._grad_history = {}
@@ -136,63 +184,109 @@ class RecurrentNNAbstract(base.MemoryModule):
         else:
             T = args[loop_args[0]].shape[0]
 
+        self._current_T = T
+
         if self.grad_state_names:
             self._init_grad_hist(self.grad_state_names, T)
 
-        # Unified block configuration
+        # ------------------------------------------------------------------
+        # Determine Chunk Sizes
+        # ------------------------------------------------------------------
+        # Unroll size (small chunk)
         if self.unroll is False:
-            block_size = T  # no unrolling → one large block
-            use_checkpoint = False  # disable checkpointing
+            unroll_size = T  # No inner unrolling
         else:
-            block_size = int(self.unroll)
-            use_checkpoint = bool(self.grad_checkpoint)
+            unroll_size = int(self.unroll)
 
-        # Compute number of blocks
-        num_blocks = (T + block_size - 1) // block_size  # ceil(T / block_size)
+        # Large chunk size
+        # Follow legacy behavior: if chunk_size is None, check if we need
+        # block-checkpoints.
+        if self.chunk_size is None:
+            # If default (None), we treat unroll_size as the chunk unit if
+            # checkpointing is ON, to match legacy behavior where unroll was the
+            # only block size.
+            # If checkpointing is OFF, large_chunk_size = T is fine (except for
+            # offloading which needs chunks).
+            if self.grad_checkpoint:
+                large_chunk_size = unroll_size
+            else:
+                large_chunk_size = T
+        else:
+            large_chunk_size = self.chunk_size
+            if self.unroll is not False:
+                if large_chunk_size % unroll_size != 0:
+                    raise ValueError(
+                        f"chunk_size ({large_chunk_size}) must be a multiple of "
+                        f"unroll ({unroll_size})"
+                    )
 
-        # Accumulators (always lists; stack once at the end)
+        # Number of large chunks
+        num_large_chunks = (T + large_chunk_size - 1) // large_chunk_size
+
+        use_checkpoint = bool(self.grad_checkpoint)
+
+        # Accumulators
         all_z_list = []
         all_states_lists = {}
 
-        # ---- unified per-block loop ----
-        for block_id in range(num_blocks):
-            start = block_id * block_size
-            end = min(start + block_size, T)
+        # ------------------------------------------------------------------
+        # Outer Loop: Large Chunks (Checkpointing & CPU Offloading)
+        # ------------------------------------------------------------------
+        for chunk_id in range(num_large_chunks):
+            start = chunk_id * large_chunk_size
+            end = min(start + large_chunk_size, T)
 
-            # Slice loop args for the block
-            block_indices = slice(start, end)
-            block_args = self._slice_args(args, loop_args, block_indices)
+            # Slice args for large chunk
+            chunk_indices = slice(start, end)
+            chunk_args = self._slice_args(args, loop_args, chunk_indices)
 
-            # Optionally checkpoint block function
+            # Process Large Chunk
             if use_checkpoint:
-                z_list_block, states_block = self._checkpointed_block_fn(
-                    *block_args, loop_args=loop_args, **kwargs
+                z_chunk, states_chunk = self._checkpointed_large_chunk(
+                    *chunk_args,
+                    loop_args=loop_args,
+                    unroll_size=unroll_size,
+                    **kwargs,
                 )
             else:
-                z_list_block, states_block = self._multi_step_forward_unrolled(
-                    *block_args, loop_args=loop_args, **kwargs
+                z_chunk, states_chunk = self._process_large_chunk_impl(
+                    *chunk_args,
+                    loop_args=loop_args,
+                    unroll_size=unroll_size,
+                    **kwargs,
                 )
 
-            # Accumulate z
-            all_z_list.extend(z_list_block)
+            # Offload to CPU if requested
+            if self.cpu_offload:
+                z_chunk = [z.cpu() for z in z_chunk]
+                states_chunk = {
+                    k: [v.cpu() for v in lst] for k, lst in states_chunk.items()
+                }
 
-            # Accumulate state
-            for k, lst in states_block.items():
+            # Accumulate
+            all_z_list.extend(z_chunk)
+            for k, lst in states_chunk.items():
                 all_states_lists.setdefault(k, []).extend(lst)
 
-        # ---- register gradient hooks on final per-timestep tensors ----
+        # ------------------------------------------------------------------
+        # Post-process: Register gradient hooks and stack
+        # ------------------------------------------------------------------
+        # Register hooks BEFORE stacking, on the original tensors in the lists
+        # This ensures hooks are on tensors that participate in the backward pass
         if self.save_grad_history:
             for state_name, tensors in all_states_lists.items():
                 if not self._should_save_grad(state_name):
                     continue
+                if state_name not in self._grad_history:
+                    self._grad_history[state_name] = [None] * T
                 for t, tensor in enumerate(tensors):
                     self._register_grad_hook(tensor, state_name, t)
 
-        # ---- stack once and return ----
-        return (
-            torch.stack(all_z_list, dim=0),
-            {k: torch.stack(v, dim=0) for k, v in all_states_lists.items()},
-        )
+        # Stack after registering hooks
+        stacked_outputs = torch.stack(all_z_list, dim=0)
+        stacked_states = {k: torch.stack(v, dim=0) for k, v in all_states_lists.items()}
+
+        return (stacked_outputs, stacked_states)
 
     def get_grad_history(self) -> dict[str, list]:
         """Retrieve saved gradient history."""
@@ -272,7 +366,9 @@ class RecurrentNN(RecurrentNNAbstract):
         neuron_inp_module: nn.Module | None = None,
         *,
         update_state_names: Sequence[str] | None = None,
-        unroll: int = 8,
+        unroll: int | bool = 8,
+        chunk_size: int | None = None,
+        cpu_offload: bool = False,
         grad_checkpoint: bool = False,
         allow_buffer=False,
         **kwargs,
@@ -280,6 +376,8 @@ class RecurrentNN(RecurrentNNAbstract):
         super().__init__(
             update_state_names=update_state_names,
             unroll=unroll,
+            chunk_size=chunk_size,
+            cpu_offload=cpu_offload,
             grad_checkpoint=grad_checkpoint,
             **kwargs,
         )
