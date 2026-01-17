@@ -763,7 +763,7 @@ def make_hetersynapse_constrained_conn(
 def stack_hetersynapse(
     conn_dict: dict,
     receptor_type_index: pd.DataFrame,
-    ignore_post_type: bool = False,
+    ignore_receptor_type: Literal["post", "all"] | None = None,
 ) -> scipy.sparse.sparray | tuple[scipy.sparse.sparray, pd.DataFrame]:
     """Convert dict of receptor-specific matrices back to stacked matrix
     format.
@@ -782,7 +782,7 @@ def stack_hetersynapse(
 
     Returns:
         Stacked sparse matrix in (pre_neuron, post_neuron * n_receptor_types) format.
-        If ignore_post_type is True, returns (stacked_conn, new_receptor_type_index)
+        If ignore_receptor_type is not None, returns (stacked_conn, new_receptor_type_index)
         as the receptor index changes.
 
     Example:
@@ -794,14 +794,31 @@ def stack_hetersynapse(
         >>> conn_dict[('E', 'I')].data *= 2.0
         >>> # Convert back to stacked format
         >>> conn_stacked = stack_hetersynapse(conn_dict, receptor_idx)
+        >>> # Or collapse everything
+        >>> conn_all, idx_all = stack_hetersynapse(conn_dict, receptor_idx, ignore_receptor_type="all")
     """
     if len(conn_dict) == 0:
         raise ValueError("conn_dict is empty")
 
     n_neuron = next(iter(conn_dict.values())).shape[0]
 
+    # Check if aggregation is requested
+    if ignore_receptor_type == "all":
+        # Sum all matrices regardless of mode
+        summed_mat = None
+        for mat in conn_dict.values():
+            if summed_mat is None:
+                summed_mat = mat.copy()
+            else:
+                summed_mat += mat
+
+        new_receptor_index_df = pd.DataFrame(
+            [(0, "all")], columns=["receptor_index", "receptor_type"]
+        )
+        return summed_mat.tocoo(), new_receptor_index_df
+
     # Check if ignore_post_type is requested
-    if ignore_post_type:
+    if ignore_receptor_type == "post":
         # We need to collapse columns.
         # Iterate over conn_dict, aggregating by pre-synaptic type
         collapsed_conn_dict = OrderedDict()
