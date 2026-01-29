@@ -15,9 +15,7 @@ from .constrain import HasConstraint
 
 try:
     from torch_sparse import spmm
-
-    spmm = torch.compiler.disable(spmm)
-except (ImportError, OSError):
+except ImportError:
     spmm = None
 
 SparseBackend = Literal["native", "torch_sparse"]
