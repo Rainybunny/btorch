@@ -1,15 +1,16 @@
 from .aggregation import agg_by_neuron, agg_by_neuropil, agg_conn
 from .branching import MR_estimation
-from .connectivity import compute_ie_ratio, HopDistanceModel
+from .connectivity import HopDistanceModel, compute_ie_ratio
 from .metrics import indices_to_mask, select_on_metric
 from .spiking import (
+    compute_raster,
+    compute_spectrum,
     cv_from_spikes,
     fano_factor_from_spikes,
     firing_rate,
     kurtosis_from_spikes,
-    raster_plot,
 )
-from .statistics import compute_log_hist, compute_spectrum, describe_array
+from .statistics import compute_log_hist, describe_array
 from .voltage import suggest_skip_timestep, voltage_overshoot
 
 
@@ -26,7 +27,7 @@ __all__ = [
     "fano_factor_from_spikes",
     "firing_rate",
     "kurtosis_from_spikes",
-    "raster_plot",
+    "compute_raster",
     "compute_log_hist",
     "compute_spectrum",
     "describe_array",

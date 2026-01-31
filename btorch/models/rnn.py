@@ -48,7 +48,17 @@ class RecurrentNNAbstract(base.MemoryModule):
         loop_args = tuple(i for i, s in enumerate(shapes) if s == T)
         return T, loop_args
 
-    def _slice_args(self, args, loop_args, t):
+    def _slice_args(self, args, loop_args, t: int):
+        out = []
+        for i, a in enumerate(args):
+            if i in loop_args:
+                out.append(a[t])
+            else:
+                out.append(a)
+        return out
+
+    @partial(torch.compiler.disable, recursive=True)
+    def _slice_args_range(self, args, loop_args, t):
         def normalize_index(t):
             if t == Ellipsis or t == "...":
                 return ...
@@ -104,9 +114,12 @@ class RecurrentNNAbstract(base.MemoryModule):
         z_seq = []
         states_seq = {}
 
+        loop_positions = tuple(loop_args)
+        static_args = list(args)
         for t in range(T):
-            sliced = self._slice_args(args, loop_args, t)
-            z, states = self.single_step_forward(*sliced, **kwargs)
+            for i in loop_positions:
+                static_args[i] = args[i][t]
+            z, states = self.single_step_forward(*static_args, **kwargs)
             z_seq.append(z)
             for k, v in states.items():
                 states_seq.setdefault(k, []).append(v)
@@ -136,7 +149,7 @@ class RecurrentNNAbstract(base.MemoryModule):
 
             # Slice args for small chunk
             sub_indices = slice(start, end)
-            sub_args = self._slice_args(chunk_args, loop_args, sub_indices)
+            sub_args = self._slice_args_range(chunk_args, loop_args, sub_indices)
 
             # Process small chunk
             z_sub, states_sub = self._process_small_chunk(
@@ -238,7 +251,7 @@ class RecurrentNNAbstract(base.MemoryModule):
 
             # Slice args for large chunk
             chunk_indices = slice(start, end)
-            chunk_args = self._slice_args(args, loop_args, chunk_indices)
+            chunk_args = self._slice_args_range(args, loop_args, chunk_indices)
 
             # Process Large Chunk
             if use_checkpoint:
