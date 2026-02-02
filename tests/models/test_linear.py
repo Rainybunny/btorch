@@ -12,6 +12,15 @@ from btorch.models.linear import (
 from tests.utils.compile import compile_or_skip
 
 
+def _forward_and_input_grad(
+    model: torch.nn.Module, x: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    x = x.clone().requires_grad_(True)
+    output = model(x)
+    output.sum().backward()
+    return output, x.grad
+
+
 @pytest.mark.parametrize("backend", available_sparse_backends())
 def test_equivalent_behavior(backend: str):
     """All connection classes match dense behavior for the same weights."""
@@ -57,23 +66,33 @@ def test_equivalent_behavior(backend: str):
     )
 
     # Forward pass without batch.
-    out_dense = dense(x)
-    out_sparse = sparse_coo(x)
-    out_constrained = constrained(x)
+    out_dense, grad_dense = _forward_and_input_grad(dense, x)
+    out_sparse, grad_sparse = _forward_and_input_grad(sparse_coo, x)
+    out_constrained, grad_constrained = _forward_and_input_grad(constrained, x)
 
     # Check they're all the same for 1D input.
     torch.testing.assert_close(out_dense, out_sparse, atol=1e-6, rtol=0.0)
     torch.testing.assert_close(out_dense, out_constrained, atol=1e-6, rtol=0.0)
 
+    torch.testing.assert_close(grad_dense, grad_sparse, atol=1e-6, rtol=0.0)
+    torch.testing.assert_close(grad_dense, grad_constrained, atol=1e-6, rtol=0.0)
+
     # Forward pass with batch.
-    out_dense_batch = dense(x_batch)
-    out_sparse_batch = sparse_coo(x_batch)
-    out_constrained_batch = constrained(x_batch)
+    out_dense_batch, grad_dense_batch = _forward_and_input_grad(dense, x_batch)
+    out_sparse_batch, grad_sparse_batch = _forward_and_input_grad(sparse_coo, x_batch)
+    out_constrained_batch, grad_constrained_batch = _forward_and_input_grad(
+        constrained, x_batch
+    )
 
     # Check they're all the same for batched input.
     torch.testing.assert_close(out_dense_batch, out_sparse_batch, atol=1e-6, rtol=0.0)
     torch.testing.assert_close(
         out_dense_batch, out_constrained_batch, atol=1e-6, rtol=0.0
+    )
+
+    torch.testing.assert_close(grad_dense_batch, grad_sparse_batch, atol=1e-6, rtol=0.0)
+    torch.testing.assert_close(
+        grad_dense_batch, grad_constrained_batch, atol=1e-6, rtol=0.0
     )
 
 
@@ -130,9 +149,11 @@ def test_constraint_optimization(backend: str, enable_dale: bool):
     final_weights = model.initial_weight * final_magnitudes
 
     # Batch and non-batch forward results should align for the same inputs.
-    out_single = model(x)
-    out_batch = model(x_batch)
+    out_single, grad_single = _forward_and_input_grad(model, x)
+    out_batch, grad_batch = _forward_and_input_grad(model, x_batch)
     torch.testing.assert_close(out_batch[0], out_single, atol=1e-6, rtol=0.0)
+
+    torch.testing.assert_close(grad_batch[0], grad_single, atol=1e-6, rtol=0.0)
 
     # Constraint check: positions (0,0) and (1,1) share group 1.
     pos_00_effective = final_weights[0]
@@ -165,15 +186,21 @@ def test_compile_matches_eager(backend: str):
     x = torch.tensor([1.0, 2.0, 3.0])
     x_batch = x[None, :]
 
-    eager = model(x)
+    eager, eager_grad = _forward_and_input_grad(model, x)
     compiled_model = compile_or_skip(model)
-    compiled = compiled_model(x)
+    compiled, compiled_grad = _forward_and_input_grad(compiled_model, x)
 
     torch.testing.assert_close(eager, compiled, atol=1e-6, rtol=0.0)
+    torch.testing.assert_close(eager_grad, compiled_grad, atol=1e-6, rtol=0.0)
 
-    eager_batch = model(x_batch)
-    compiled_batch = compiled_model(x_batch)
+    eager_batch, eager_grad_batch = _forward_and_input_grad(model, x_batch)
+    compiled_batch, compiled_grad_batch = _forward_and_input_grad(
+        compiled_model, x_batch
+    )
     torch.testing.assert_close(eager_batch, compiled_batch, atol=1e-6, rtol=0.0)
+    torch.testing.assert_close(
+        eager_grad_batch, compiled_grad_batch, atol=1e-6, rtol=0.0
+    )
 
 
 @pytest.mark.parametrize("backend", available_sparse_backends())
@@ -225,9 +252,11 @@ def test_non_square_matrix(backend: str):
     )
 
     # Test wide matrix forward passes
-    out_dense_wide = dense_wide(x_wide)
-    out_sparse_wide = sparse_wide(x_wide)
-    out_constrained_wide = constrained_wide(x_wide)
+    out_dense_wide, grad_dense_wide = _forward_and_input_grad(dense_wide, x_wide)
+    out_sparse_wide, grad_sparse_wide = _forward_and_input_grad(sparse_wide, x_wide)
+    out_constrained_wide, grad_constrained_wide = _forward_and_input_grad(
+        constrained_wide, x_wide
+    )
 
     assert out_dense_wide.shape == (2,), f"Expected (2,), got {out_dense_wide.shape}"
     torch.testing.assert_close(out_dense_wide, out_sparse_wide, atol=1e-6, rtol=0.0)
@@ -235,10 +264,21 @@ def test_non_square_matrix(backend: str):
         out_dense_wide, out_constrained_wide, atol=1e-6, rtol=0.0
     )
 
+    torch.testing.assert_close(grad_dense_wide, grad_sparse_wide, atol=1e-6, rtol=0.0)
+    torch.testing.assert_close(
+        grad_dense_wide, grad_constrained_wide, atol=1e-6, rtol=0.0
+    )
+
     # Batched forward passes for wide matrix
-    out_dense_wide_batch = dense_wide(x_wide_batch)
-    out_sparse_wide_batch = sparse_wide(x_wide_batch)
-    out_constrained_wide_batch = constrained_wide(x_wide_batch)
+    out_dense_wide_batch, grad_dense_wide_batch = _forward_and_input_grad(
+        dense_wide, x_wide_batch
+    )
+    out_sparse_wide_batch, grad_sparse_wide_batch = _forward_and_input_grad(
+        sparse_wide, x_wide_batch
+    )
+    out_constrained_wide_batch, grad_constrained_wide_batch = _forward_and_input_grad(
+        constrained_wide, x_wide_batch
+    )
 
     assert out_dense_wide_batch.shape == (
         2,
@@ -249,6 +289,13 @@ def test_non_square_matrix(backend: str):
     )
     torch.testing.assert_close(
         out_dense_wide_batch, out_constrained_wide_batch, atol=1e-6, rtol=0.0
+    )
+
+    torch.testing.assert_close(
+        grad_dense_wide_batch, grad_sparse_wide_batch, atol=1e-6, rtol=0.0
+    )
+    torch.testing.assert_close(
+        grad_dense_wide_batch, grad_constrained_wide_batch, atol=1e-6, rtol=0.0
     )
 
     # Case 2: Tall matrix (more outputs than inputs): 2x4 matrix
@@ -292,9 +339,11 @@ def test_non_square_matrix(backend: str):
     )
 
     # Test tall matrix forward passes
-    out_dense_tall = dense_tall(x_tall)
-    out_sparse_tall = sparse_tall(x_tall)
-    out_constrained_tall = constrained_tall(x_tall)
+    out_dense_tall, grad_dense_tall = _forward_and_input_grad(dense_tall, x_tall)
+    out_sparse_tall, grad_sparse_tall = _forward_and_input_grad(sparse_tall, x_tall)
+    out_constrained_tall, grad_constrained_tall = _forward_and_input_grad(
+        constrained_tall, x_tall
+    )
 
     assert out_dense_tall.shape == (4,), f"Expected (4,), got {out_dense_tall.shape}"
     torch.testing.assert_close(out_dense_tall, out_sparse_tall, atol=1e-6, rtol=0.0)
@@ -302,10 +351,21 @@ def test_non_square_matrix(backend: str):
         out_dense_tall, out_constrained_tall, atol=1e-6, rtol=0.0
     )
 
+    torch.testing.assert_close(grad_dense_tall, grad_sparse_tall, atol=1e-6, rtol=0.0)
+    torch.testing.assert_close(
+        grad_dense_tall, grad_constrained_tall, atol=1e-6, rtol=0.0
+    )
+
     # Batched forward passes for tall matrix
-    out_dense_tall_batch = dense_tall(x_tall_batch)
-    out_sparse_tall_batch = sparse_tall(x_tall_batch)
-    out_constrained_tall_batch = constrained_tall(x_tall_batch)
+    out_dense_tall_batch, grad_dense_tall_batch = _forward_and_input_grad(
+        dense_tall, x_tall_batch
+    )
+    out_sparse_tall_batch, grad_sparse_tall_batch = _forward_and_input_grad(
+        sparse_tall, x_tall_batch
+    )
+    out_constrained_tall_batch, grad_constrained_tall_batch = _forward_and_input_grad(
+        constrained_tall, x_tall_batch
+    )
 
     assert out_dense_tall_batch.shape == (
         2,
@@ -316,6 +376,13 @@ def test_non_square_matrix(backend: str):
     )
     torch.testing.assert_close(
         out_dense_tall_batch, out_constrained_tall_batch, atol=1e-6, rtol=0.0
+    )
+
+    torch.testing.assert_close(
+        grad_dense_tall_batch, grad_sparse_tall_batch, atol=1e-6, rtol=0.0
+    )
+    torch.testing.assert_close(
+        grad_dense_tall_batch, grad_constrained_tall_batch, atol=1e-6, rtol=0.0
     )
 
 
