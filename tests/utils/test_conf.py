@@ -2,6 +2,9 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pytest
+from omegaconf import OmegaConf
+
 from btorch.utils.conf import load_config, to_dotlist
 
 
@@ -127,6 +130,21 @@ def test_to_dotlist_respects_exclusions(monkeypatch):
         "solver.plot_filename=cli.png",
     }
 
+    # Subfield traversal should shift path roots, then include/exclude still works.
+    solver_only = to_dotlist(
+        args_cli.single,
+        use_equal=True,
+        subfield="solver",
+        include={"plot_fi", "plot_filename"},
+        exclude={"plot_filename"},
+    )
+    assert solver_only == ["plot_fi=True"]
+
+    # Nested list traversal with include/exclude at the selected subfield root.
+    nested = OmegaConf.create({"a": {"b": [{"c": 1}, {"c": 2}]}})
+    assert to_dotlist(nested, subfield="a.b.1", include={"c"}) == ["c=2"]
+    assert to_dotlist(nested, subfield="a.b.1", exclude={"c"}) == []
+
 
 def test_batch_worker_command_build(monkeypatch, tmp_path):
     """End-to-end shape of batch: config file -> batch.single -> worker arg list."""
@@ -180,3 +198,12 @@ def test_batch_worker_command_build(monkeypatch, tmp_path):
         "solver.plot_fi=True",
         "common.id=99",
     }
+
+
+def test_to_dotlist_subfield_missing_policy():
+    cfg = OmegaConf.create({"a": {"b": 1}})
+
+    with pytest.raises(KeyError):
+        to_dotlist(cfg, subfield="x.y")
+
+    assert to_dotlist(cfg, subfield="x.y", missing_subfield_policy="empty") == []
