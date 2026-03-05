@@ -7,7 +7,7 @@ from torch import nn
 
 from btorch.models.base import MemoryModule
 from btorch.models.functional import reset_net_state
-from btorch.models.linear import available_sparse_backends, DenseConn, SparseConn
+from btorch.models.linear import DenseConn, SparseConn, available_sparse_backends
 from btorch.models.rnn import make_rnn
 from tests.utils.compile import compile_or_skip
 
