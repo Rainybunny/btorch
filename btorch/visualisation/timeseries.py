@@ -1505,6 +1505,7 @@ def plot_neuron_traces(
 
     # Convert to numpy
     voltage = _to_numpy(voltage)
+    spikes = _to_numpy(spikes)
     n_time, n_neurons = voltage.shape
     times = np.arange(n_time) * dt
     duration_ms = n_time * dt
