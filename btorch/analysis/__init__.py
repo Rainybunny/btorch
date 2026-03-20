@@ -13,12 +13,25 @@ from .metrics import indices_to_mask, select_on_metric
 from .spiking import (
     compute_raster,
     compute_spectrum,
-    cv_from_spikes,
-    fano_factor_from_spikes,
+    cv_temporal,
+    fano,
+    fano_population,
+    fano_sweep,
+    fano_temporal,
     firing_rate,
-    kurtosis_from_spikes,
+    isi_cv,
+    isi_cv_population,
+    kurtosis,
+    kurtosis_population,
+    local_variation,
 )
-from .statistics import compute_log_hist, describe_array
+from .statistics import (
+    StatChoice,
+    compute_log_hist,
+    describe_array,
+    use_percentiles,
+    use_stats,
+)
 from .voltage import suggest_skip_timestep, voltage_overshoot
 
 
@@ -35,14 +48,29 @@ __all__ = [
     "compute_ie_ratio",
     "indices_to_mask",
     "select_on_metric",
-    "cv_from_spikes",
-    "fano_factor_from_spikes",
+    # New simplified API
+    "isi_cv",
+    "fano",
+    "kurtosis",
+    "local_variation",
+    # Population metrics
+    "isi_cv_population",
+    "fano_population",
+    "kurtosis_population",
+    # Temporal variants
+    "cv_temporal",
+    "fano_temporal",
+    # Sweep functions
+    "fano_sweep",
+    # Utilities
     "firing_rate",
-    "kurtosis_from_spikes",
     "compute_raster",
     "compute_log_hist",
     "compute_spectrum",
     "describe_array",
     "suggest_skip_timestep",
     "voltage_overshoot",
+    "StatChoice",
+    "use_stats",
+    "use_percentiles",
 ]

@@ -30,6 +30,7 @@ site/
 .idea/
 .vs/
 .vscode/
+.kilocode/
 .~lock.*
 /local/
 /metadata/md5-cache
