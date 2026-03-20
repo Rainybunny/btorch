@@ -5,9 +5,15 @@ from typing import Any, Literal
 import numpy as np
 import torch
 
+from ..types import TensorLike
 from .base import MemoryModule
-from .types import TensorLike
 
+
+# DECRECATED: this was designed to scale/unscale the network weight
+#   automatically. Scaling makes param values compatible with gradient learning
+#   rate. However, through practice, it seems easier to pass scaled param
+#   directly to the model.
+#   TODO: revisit for a better design.
 
 # TODO: needs rework. use scale_state_ for now.
 #   - how does it fit in states dict and memory?

@@ -4,9 +4,9 @@ import numpy as np
 import scipy
 import torch
 
+from ..types import TensorLike
 from . import base
 from .shape import expand_leading_dims
-from .types import TensorLike
 
 
 def _tensor_with_default(

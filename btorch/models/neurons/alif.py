@@ -5,11 +5,11 @@ import torch
 from jaxtyping import Float
 from torch import Tensor
 
+from ...types import TensorLike
 from .. import environ
 from ..base import BaseNode
 from ..ode import exp_euler_step
 from ..surrogate import Sigmoid
-from ..types import TensorLike
 
 
 class ALIF(BaseNode):

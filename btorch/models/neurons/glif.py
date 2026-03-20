@@ -5,13 +5,12 @@ import torch
 from jaxtyping import Float
 from torch import Tensor
 
+from ...types import TensorLike
 from .. import environ
 from ..base import BaseNode
 from ..ode import exp_euler_step
-from ..scale import SupportScaleState
 from ..shape import expand_trailing_dims
 from ..surrogate import ATan
-from ..types import TensorLike
 
 
 def get_rheobase(v_threshold, v_rest, c_m, tau):
@@ -23,7 +22,7 @@ def get_rheobase(v_threshold, v_rest, c_m, tau):
     return I_rheobase
 
 
-class GLIF3(BaseNode, SupportScaleState):
+class GLIF3(BaseNode):
     """GLIF3 model as described in [1]. Leaky integrate and fire model with
     refractory period and after spike currents.
 

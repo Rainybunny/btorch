@@ -10,9 +10,9 @@ from jaxtyping import Float
 from spikingjelly.activation_based import base
 from torch import Tensor
 
+from ..types import TensorLike
 from .shape import expand_leading_dims
 from .surrogate import Sigmoid
-from .types import TensorLike
 
 
 def is_broadcastable(shape_from, shape_to):

@@ -5,15 +5,14 @@ import torch
 from jaxtyping import Float
 from torch import Tensor
 
+from ...types import TensorLike
 from .. import environ
 from ..base import BaseNode
 from ..ode import euler_step
-from ..scale import SupportScaleState
 from ..surrogate import Sigmoid
-from ..types import TensorLike
 
 
-class LIF(BaseNode, SupportScaleState):
+class LIF(BaseNode):
     """Leaky integrate-and-fire neuron with optional refractory period."""
 
     refractory: torch.Tensor | None

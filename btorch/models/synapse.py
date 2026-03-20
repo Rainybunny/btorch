@@ -4,10 +4,10 @@ from typing import Protocol
 import pandas as pd
 import torch
 
+from ..types import TensorLike
 from . import environ
 from .base import MemoryModule, normalize_n_neuron
 from .ode import exp_euler_step
-from .types import TensorLike
 
 
 class Synapse(Protocol):

@@ -1,5 +1,6 @@
 channels:
   - conda-forge
+  - pyg
 dependencies:
   - python=3.12
   - pytorch-gpu>=2.8

@@ -10,7 +10,7 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
 from ..analysis.aggregation import agg_by_neuropil, group_ecdf, group_values
-from ..models.types import TensorLike
+from ..types import TensorLike
 
 
 GroupPlotKind = Literal["violin", "box", "ecdf"]

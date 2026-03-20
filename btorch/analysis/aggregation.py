@@ -6,7 +6,7 @@ import pandas as pd
 import scipy.sparse
 import torch
 
-from ..models.types import TensorLike
+from ..types import TensorLike
 
 
 def agg_by_neuron(

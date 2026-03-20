@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from jaxtyping import Float
 from torch import nn
 
-from .types import TensorLike
+from ..types import TensorLike
 
 
 class VoltageRegularizer(nn.Module):
