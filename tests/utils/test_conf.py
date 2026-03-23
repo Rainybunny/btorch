@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 
-from btorch.utils.conf import load_config, to_dotlist
+from btorch.utils.conf import (
+    diff_conf,
+    diff_conf_records,
+    load_config,
+    to_dotlist,
+)
 
 
 @dataclass
@@ -207,3 +212,206 @@ def test_to_dotlist_subfield_missing_policy():
         to_dotlist(cfg, subfield="x.y")
 
     assert to_dotlist(cfg, subfield="x.y", missing_subfield_policy="empty") == []
+
+
+def test_diff_conf_all_detects_nested_changed_added_removed():
+    """Diff config should keep only changed/added/removed leaf paths.
+
+    This test models realistic config edits where a user:
+    - changes existing scalar values,
+    - adds new fields,
+    - removes previous fields,
+    - updates list members and extends lists,
+    - replaces a full subtree with a scalar.
+    """
+
+    conf_a = OmegaConf.create(
+        {
+            "model": {"hidden": 128, "dropout": 0.1},
+            "data": {"path": "/dataset", "batch_size": 16},
+            "tags": ["baseline", "v1"],
+            "scheduler": {"type": "cosine"},
+        }
+    )
+
+    conf_b = OmegaConf.create(
+        {
+            "model": {"hidden": 256, "activation": "gelu"},
+            "tags": ["baseline", "v2", "extra"],
+            "scheduler": "disabled",
+        }
+    )
+
+    # Compare B to A and include changed + added + removed keys.
+    diff_cfg = diff_conf(conf_a, conf_b)
+
+    # model.hidden changed, model.activation added, model.dropout removed
+    # data subtree removed entirely -> each removed leaf path should be listed
+    # tags.1 changed and tags.2 added
+    # scheduler switched dict -> scalar, reported at the subtree root path
+    assert OmegaConf.to_container(diff_cfg) == {
+        "model": {
+            "hidden": 256,
+            "activation": "gelu",
+            "dropout": None,
+        },
+        "data": {"path": None, "batch_size": None},
+        "tags": [None, "v2", "extra"],
+        "scheduler": "disabled",
+    }
+
+
+def test_diff_conf_mode_filters_are_intentional_and_directional():
+    """Each mode should expose only requested categories with concrete values.
+
+    A is the baseline, B is the edited configuration. The assertions
+    ensure mode selection is meaningful for downstream workflows that
+    may only care about additions/overrides vs removals.
+    """
+
+    conf_a = OmegaConf.create(
+        {
+            "seed": 1,
+            "optim": {"lr": 1e-3, "weight_decay": 0.0},
+            "log_interval": 10,
+        }
+    )
+    conf_b = OmegaConf.create(
+        {
+            "seed": 2,  # changed
+            "optim": {"lr": 5e-4},  # changed + removed weight_decay
+            "project": "exp-42",  # added
+        }
+    )
+
+    assert OmegaConf.to_container(diff_conf(conf_a, conf_b, include={"changed"})) == {
+        "seed": 2,
+        "optim": {"lr": 5e-4},
+    }
+
+    assert OmegaConf.to_container(
+        diff_conf(conf_a, conf_b, include={"added", "changed"})
+    ) == {
+        "seed": 2,
+        "optim": {"lr": 5e-4},
+        "project": "exp-42",
+    }
+
+    assert OmegaConf.to_container(
+        diff_conf(conf_a, conf_b, include={"removed", "changed"})
+    ) == {
+        "seed": 2,
+        "optim": {"lr": 5e-4, "weight_decay": None},
+        "log_interval": None,
+    }
+
+    assert OmegaConf.to_container(diff_conf(conf_a, conf_b)) == {
+        "seed": 2,
+        "optim": {"lr": 5e-4, "weight_decay": None},
+        "project": "exp-42",
+        "log_interval": None,
+    }
+
+
+def test_diff_conf_rejects_non_omegaconf_inputs():
+    """Input validation should fail loudly to avoid silent mis-comparisons."""
+
+    conf = OmegaConf.create({"a": 1})
+
+    with pytest.raises(TypeError):
+        diff_conf({"a": 1}, conf)
+
+    with pytest.raises(TypeError):
+        diff_conf(conf, {"a": 1})
+
+
+def test_diff_conf_records_captures_status_and_old_new_values_for_spawning():
+    """Value-level diff should be directly usable by parent/child launch logic.
+
+    The parent owns baseline A. It prepares child B by overriding a
+    subset of keys. The diff output must preserve both the operation
+    type and concrete values so the launcher can decide whether to pass
+    key=value or remove keys.
+    """
+
+    conf_a = OmegaConf.create(
+        {
+            "single": {
+                "common": {"id": 0, "overwrite": False, "tag": "baseline"},
+                "solver": {"plot_fi": False, "plot_filename": "fi.png"},
+            }
+        }
+    )
+    conf_b = OmegaConf.create(
+        {
+            "single": {
+                "common": {"id": 42, "overwrite": True},
+                "solver": {"plot_fi": True, "plot_filename": "run42.png"},
+            }
+        }
+    )
+
+    records = diff_conf_records(conf_a, conf_b)
+
+    assert records["single.common.id"] == {
+        "status": "changed",
+        "old": 0,
+        "new": 42,
+    }
+    assert records["single.common.overwrite"] == {
+        "status": "changed",
+        "old": False,
+        "new": True,
+    }
+    assert records["single.solver.plot_fi"] == {
+        "status": "changed",
+        "old": False,
+        "new": True,
+    }
+    assert records["single.solver.plot_filename"] == {
+        "status": "changed",
+        "old": "fi.png",
+        "new": "run42.png",
+    }
+    assert records["single.common.tag"] == {
+        "status": "removed",
+        "old": "baseline",
+        "new": None,
+    }
+
+
+def test_diff_conf_integrates_with_to_dotlist_for_worker_overrides():
+    """Master can call diff_conf then to_dotlist to build child CLI arguments.
+
+    This mirrors the practical workflow where a master script computes a
+    minimal child argument list and launches workers with only changed
+    keys.
+    """
+
+    conf_a = OmegaConf.create(
+        {
+            "single": {
+                "common": {"id": 0, "overwrite": False, "tag": "baseline"},
+                "solver": {"plot_fi": False, "plot_filename": "fi.png"},
+            }
+        }
+    )
+    conf_b = OmegaConf.create(
+        {
+            "single": {
+                "common": {"id": 42, "overwrite": True},
+                "solver": {"plot_fi": True, "plot_filename": "run42.png"},
+            }
+        }
+    )
+
+    diff_cfg = diff_conf(conf_a, conf_b)
+    child_cli = to_dotlist(diff_cfg, use_equal=True)
+
+    assert set(child_cli) == {
+        "single.common.id=42",
+        "single.common.overwrite=True",
+        "single.solver.plot_fi=True",
+        "single.solver.plot_filename=run42.png",
+        "single.common.tag=null",
+    }

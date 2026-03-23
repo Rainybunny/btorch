@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal
 
@@ -150,3 +151,273 @@ def to_dotlist(
         start_cfg = conf
     flatten_conf(start_cfg)
     return ret
+
+
+def diff_conf(
+    conf_a: DictConfig | ListConfig,
+    conf_b: DictConfig | ListConfig,
+    mode: (Iterable[Literal["changed", "added", "removed"]] | None) = None,
+) -> DictConfig | ListConfig:
+    """Compare ``conf_b`` to ``conf_a`` and return a structured OmegaConf diff.
+
+    The returned config contains only the selected changed keys. For removed
+    keys (when moded by ``mode``), values are set to ``None`` so callers can
+    render these entries via :func:`to_dotlist` as ``key=null``.
+    """
+
+    if not isinstance(conf_a, (DictConfig, ListConfig)):
+        raise TypeError("diff_conf expects conf_a to be DictConfig or ListConfig.")
+    if not isinstance(conf_b, (DictConfig, ListConfig)):
+        raise TypeError("diff_conf expects conf_b to be DictConfig or ListConfig.")
+
+    records = diff_conf_records(conf_a, conf_b, mode=mode)
+
+    def _is_index(token: str) -> bool:
+        return token.isdigit()
+
+    def _empty_container(next_token: str):
+        return [] if _is_index(next_token) else {}
+
+    def _set_path(root, path: str, value):
+        if path == "<root>":
+            return value
+
+        tokens = path.split(".")
+        if root is None:
+            root = _empty_container(tokens[0])
+
+        cur = root
+        for i, token in enumerate(tokens):
+            is_last = i == len(tokens) - 1
+
+            if isinstance(cur, dict):
+                if is_last:
+                    cur[token] = value
+                    break
+                if token not in cur:
+                    cur[token] = _empty_container(tokens[i + 1])
+                cur = cur[token]
+                continue
+
+            if isinstance(cur, list):
+                idx = int(token)
+                while len(cur) <= idx:
+                    if is_last:
+                        cur.append(None)
+                    else:
+                        cur.append(_empty_container(tokens[i + 1]))
+                if is_last:
+                    cur[idx] = value
+                    break
+                if cur[idx] is None:
+                    cur[idx] = _empty_container(tokens[i + 1])
+                cur = cur[idx]
+                continue
+
+            raise TypeError(f"Cannot set nested path '{path}' through scalar node.")
+
+        return root
+
+    diff_tree = None
+    for path, entry in sorted(records.items()):
+        if entry["status"] == "removed":
+            value = None
+        else:
+            value = entry["new"]
+        diff_tree = _set_path(diff_tree, path, value)
+
+    if diff_tree is None:
+        # Keep return type stable and flattenable.
+        if isinstance(conf_b, ListConfig):
+            return OmegaConf.create([])
+        return OmegaConf.create({})
+
+    if not isinstance(diff_tree, (dict, list, DictConfig, ListConfig)):
+        raise ValueError(
+            "diff_conf produced a scalar root diff. "
+            "Expected a DictConfig/ListConfig root."
+        )
+
+    return OmegaConf.create(diff_tree)
+
+
+def diff_conf_records(
+    conf_a: DictConfig | ListConfig,
+    conf_b: DictConfig | ListConfig,
+    mode: (Iterable[Literal["changed", "added", "removed"]] | None) = None,
+) -> dict[str, dict[str, object]]:
+    """Compare ``conf_b`` to ``conf_a`` and return per-key value-level records.
+
+    Each record has the shape ``{"status": str, "old": object, "new": object}``.
+
+    - ``status='changed'``: key exists in both, value differs.
+    - ``status='added'``: key exists only in ``conf_b``.
+    - ``status='removed'``: key exists only in ``conf_a``.
+
+    This representation is suitable when a caller needs both key names and values,
+    for example to build child-process overrides from a baseline config.
+    """
+
+    if not isinstance(conf_a, (DictConfig, ListConfig)):
+        raise TypeError(
+            "diff_conf_records expects conf_a to be DictConfig or ListConfig."
+        )
+    if not isinstance(conf_b, (DictConfig, ListConfig)):
+        raise TypeError(
+            "diff_conf_records expects conf_b to be DictConfig or ListConfig."
+        )
+
+    if mode is None:
+        mode_set = {"changed", "added", "removed"}
+    else:
+        mode_set = set(mode)
+
+    valid_status = {"changed", "added", "removed"}
+    if not mode_set.issubset(valid_status):
+        raise ValueError("mode must only contain: 'changed', 'added', 'removed'.")
+
+    changed: set[str] = set()
+    added: set[str] = set()
+    removed: set[str] = set()
+    changed_values: dict[str, tuple[object, object]] = {}
+    added_values: dict[str, object] = {}
+    removed_values: dict[str, object] = {}
+
+    def _is_container(node) -> bool:
+        return isinstance(node, (DictConfig, ListConfig))
+
+    def _collect_leaf_paths(node, path: str) -> set[str]:
+        if isinstance(node, DictConfig):
+            out: set[str] = set()
+            for key, value in node.items():
+                new_path = f"{path}.{key}" if path else str(key)
+                out |= _collect_leaf_paths(value, new_path)
+            return out
+
+        if isinstance(node, ListConfig):
+            out = set()
+            for idx, value in enumerate(node):
+                new_path = f"{path}.{idx}" if path else str(idx)
+                out |= _collect_leaf_paths(value, new_path)
+            return out
+
+        return {path} if path else {"<root>"}
+
+    def _walk(a_node, b_node, path: str = ""):
+        if isinstance(a_node, DictConfig) and isinstance(b_node, DictConfig):
+            keys_a = set(a_node.keys())
+            keys_b = set(b_node.keys())
+
+            for key in keys_a - keys_b:
+                key_path = f"{path}.{key}" if path else str(key)
+                leaf_paths = _collect_leaf_paths(a_node[key], key_path)
+                removed.update(leaf_paths)
+                for leaf_path in leaf_paths:
+                    removed_values[leaf_path] = OmegaConf.select(conf_a, leaf_path)
+
+            for key in keys_b - keys_a:
+                key_path = f"{path}.{key}" if path else str(key)
+                leaf_paths = _collect_leaf_paths(b_node[key], key_path)
+                added.update(leaf_paths)
+                for leaf_path in leaf_paths:
+                    added_values[leaf_path] = OmegaConf.select(conf_b, leaf_path)
+
+            for key in keys_a & keys_b:
+                key_path = f"{path}.{key}" if path else str(key)
+                _walk(a_node[key], b_node[key], key_path)
+            return
+
+        if isinstance(a_node, ListConfig) and isinstance(b_node, ListConfig):
+            len_a = len(a_node)
+            len_b = len(b_node)
+            common = min(len_a, len_b)
+
+            for idx in range(common):
+                key_path = f"{path}.{idx}" if path else str(idx)
+                _walk(a_node[idx], b_node[idx], key_path)
+
+            for idx in range(common, len_a):
+                key_path = f"{path}.{idx}" if path else str(idx)
+                leaf_paths = _collect_leaf_paths(a_node[idx], key_path)
+                removed.update(leaf_paths)
+                for leaf_path in leaf_paths:
+                    removed_values[leaf_path] = OmegaConf.select(conf_a, leaf_path)
+
+            for idx in range(common, len_b):
+                key_path = f"{path}.{idx}" if path else str(idx)
+                leaf_paths = _collect_leaf_paths(b_node[idx], key_path)
+                added.update(leaf_paths)
+                for leaf_path in leaf_paths:
+                    added_values[leaf_path] = OmegaConf.select(conf_b, leaf_path)
+            return
+
+        if _is_container(a_node) != _is_container(b_node):
+            key = path if path else "<root>"
+            changed.add(key)
+            changed_values[key] = (a_node, b_node)
+            return
+
+        if a_node != b_node:
+            key = path if path else "<root>"
+            changed.add(key)
+            changed_values[key] = (a_node, b_node)
+
+    _walk(conf_a, conf_b)
+
+    out: set[str] = set()
+    if "changed" in mode_set:
+        out |= changed
+    if "added" in mode_set:
+        out |= added
+    if "removed" in mode_set:
+        out |= removed
+
+    records: dict[str, dict[str, object]] = {}
+    for key in sorted(out):
+        if key in changed:
+            old_value, new_value = changed_values[key]
+            records[key] = {"status": "changed", "old": old_value, "new": new_value}
+            continue
+        if key in added:
+            records[key] = {"status": "added", "old": None, "new": added_values[key]}
+            continue
+        records[key] = {"status": "removed", "old": removed_values[key], "new": None}
+
+    return records
+
+
+def diff_conf_dotlist(
+    conf_a: DictConfig | ListConfig,
+    conf_b: DictConfig | ListConfig,
+    mode: (Iterable[Literal["changed", "added", "removed"]] | None) = None,
+    removed_prefix: str = "~",
+) -> list[str]:
+    """Build CLI-style overrides that transform ``conf_a`` into ``conf_b``.
+
+    For ``added`` and ``changed`` entries, this emits ``"path=value"``.
+    For ``removed`` entries (when moded by ``mode``), this emits
+    ``"{removed_prefix}path"``. By default this produces Hydra-style remove
+    overrides such as ``"~model.dropout"``.
+    """
+
+    records = diff_conf_records(conf_a, conf_b, mode=mode)
+
+    dotlist: list[str] = []
+    for key in sorted(records.keys()):
+        status = records[key]["status"]
+        new_value = records[key]["new"]
+
+        if status == "removed":
+            dotlist.append(f"{removed_prefix}{key}")
+            continue
+
+        if isinstance(new_value, (DictConfig, ListConfig, dict, list)):
+            raise ValueError(
+                "diff_conf_dotlist cannot serialize container-valued changes at "
+                f"'{key}'. Use diff_conf_records for this case."
+            )
+
+        value = "null" if new_value is None else new_value
+        dotlist.append(f"{key}={value}")
+
+    return dotlist
