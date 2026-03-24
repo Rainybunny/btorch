@@ -22,6 +22,17 @@ from btorch.analysis.dynamic_tools.ei_balance import (
 # =============================================================================
 
 
+def generate_zero_signal(
+    duration_ms: float = 1000.0, dt_ms: float = 1.0, n_neurons: int = 10
+):
+    """Generate zero signals for E and I currents."""
+    t = np.arange(0, duration_ms, dt_ms)
+    T = len(t)
+    I_e = np.zeros((T, n_neurons))
+    I_i = np.zeros((T, n_neurons))
+    return I_e.astype(np.float16), I_i.astype(np.float16)
+
+
 def generate_almost_perfect_balance_signal(
     duration_ms: float = 1000.0,
     dt_ms: float = 1.0,
@@ -185,6 +196,37 @@ class TestECIWithKnownSignals:
 
         np.testing.assert_allclose(eci, 1.0, atol=0.1)
 
+    def test_eci_all_zeros_with_batch_axis(self):
+        """All-zero inputs with batch_axis should preserve non-aggregated
+        dims."""
+        T, B, N = 100, 5, 10  # time, batch, neurons
+        I_e = np.zeros((T, B, N), dtype=np.float32)
+        I_i = np.zeros((T, B, N), dtype=np.float32)
+
+        # batch_axis=1 means aggregate over time (0) and batch (1)
+        # Output should preserve only neurons: shape (N,)
+        eci, info = compute_eci(I_e, I_i, batch_axis=1)
+        assert eci.shape == (N,)
+        np.testing.assert_allclose(eci, 1.0)
+
+        # Test with tuple batch_axis
+        eci, info = compute_eci(I_e, I_i, batch_axis=(1,))
+        assert eci.shape == (N,)
+        np.testing.assert_allclose(eci, 1.0)
+
+    def test_eci_all_zeros_torch_with_batch_axis(self):
+        """All-zero torch inputs with batch_axis should preserve non-aggregated
+        dims."""
+        T, B, N = 100, 5, 10
+        I_e = torch.zeros(T, B, N, dtype=torch.float32)
+        I_i = torch.zeros(T, B, N, dtype=torch.float32)
+
+        # batch_axis=1 means aggregate over time (0) and batch (1)
+        eci, info = compute_eci(I_e, I_i, batch_axis=1)
+        assert eci.shape == (N,)
+        assert isinstance(eci, torch.Tensor)
+        np.testing.assert_allclose(eci.numpy(), 1.0)
+
     def test_eci_half_normal_uncorrelated(self):
         """Half-normal uncorrelated E/I gives ECI ≈ 0.41.
 
@@ -208,7 +250,7 @@ class TestECIWithKnownSignals:
             expected_eci,
             atol=0.05,
             err_msg=(
-                f"Half-normal ECI should be ≈ {expected_eci}, " f"got {eci.mean():.3f}"
+                f"Half-normal ECI should be ≈ {expected_eci}, got {eci.mean():.3f}"
             ),
         )
         # All neurons should give consistent results
@@ -335,8 +377,7 @@ class TestECIWithKnownSignals:
         # Aggregate over trials
         eci, info = compute_eci(I_e, I_i, batch_axis=(1,))
 
-        # Should return per-time-step values
-        assert eci.shape == (1000, 10)
+        assert eci.shape == (10,)
 
     def test_eci_torch_fp16(self):
         """ECI should handle float16 input correctly."""
@@ -592,14 +633,14 @@ class TestEIBalanceFull:
             expected_eci,
             atol=0.05,
             err_msg=(
-                f"Half-normal ECI should be ≈ {expected_eci}, " f"got {eci.mean():.3f}"
+                f"Half-normal ECI should be ≈ {expected_eci}, got {eci.mean():.3f}"
             ),
         )
 
         # Tracking correlation should be low (uncorrelated)
-        assert peak_corr.mean() < 0.3, (
-            "Uncorrelated tracking corr should be low, " f"got {peak_corr.mean():.3f}"
-        )
+        assert (
+            peak_corr.mean() < 0.3
+        ), f"Uncorrelated tracking corr should be low, got {peak_corr.mean():.3f}"
 
         # Info should contain stat_info results
         assert "eci_mean" in info
@@ -629,9 +670,9 @@ class TestEIBalanceFull:
         )
 
         # Tracking correlation should be low (uncorrelated)
-        assert peak_corr.mean() < 0.3, (
-            "Uncorrelated tracking corr should be low, " f"got {peak_corr.mean():.3f}"
-        )
+        assert (
+            peak_corr.mean() < 0.3
+        ), f"Uncorrelated tracking corr should be low, got {peak_corr.mean():.3f}"
 
         # Info should contain stat_info results
         assert "eci_mean" in info
@@ -686,6 +727,17 @@ class TestEIBalanceFull:
             torch.from_numpy(I_e), torch.from_numpy(I_i)
         )
 
+        np.testing.assert_allclose(eci_np, eci_torch.numpy(), rtol=1e-2)
+        np.testing.assert_allclose(peak_np, peak_torch.numpy(), rtol=1e-2)
+        np.testing.assert_allclose(lag_np, lag_torch.numpy(), rtol=1e-2)
+
+        np.random.seed(42)
+        I_e, I_i = generate_zero_signal(duration_ms=1000.0, n_neurons=10)
+
+        eci_np, peak_np, lag_np, _ = compute_ei_balance(I_e, I_i)
+        eci_torch, peak_torch, lag_torch, _ = compute_ei_balance(
+            torch.from_numpy(I_e), torch.from_numpy(I_i)
+        )
         np.testing.assert_allclose(eci_np, eci_torch.numpy(), rtol=1e-2)
         np.testing.assert_allclose(peak_np, peak_torch.numpy(), rtol=1e-2)
         np.testing.assert_allclose(lag_np, lag_torch.numpy(), rtol=1e-2)

@@ -16,6 +16,7 @@ def _cv_numpy(
     spike_data: np.ndarray,
     dt_ms: float,
     batch_axis: tuple | None,
+    dtype: np.dtype | None = None,
 ):
     """NumPy implementation of ISI CV."""
     orig_shape = spike_data.shape
@@ -77,13 +78,14 @@ def _cv_torch(
     spike_data: torch.Tensor,
     dt_ms: float,
     batch_axis: tuple | None,
+    dtype: torch.dtype | None = None,
 ):
     """Torch implementation of ISI CV with GPU optimization.
 
     Strategy: Aggregate on GPU if needed, transfer to CPU for ISI extraction
     (more efficient than pure GPU due to divergent control flow), then return.
 
-    Note: Accumulates in float32 for numerical accuracy even with float16 input.
+    Note: Uses specified dtype or input dtype for accumulation.
     """
     device = spike_data.device
     orig_shape = spike_data.shape
@@ -91,8 +93,7 @@ def _cv_torch(
 
     # Aggregate across batch dimensions if specified
     if batch_axis is not None:
-        axes_to_sum = tuple(batch_axis)
-        spike_aggregated = torch.sum(spike_data, dim=axes_to_sum, keepdim=False)
+        spike_aggregated = torch.sum(spike_data, dim=batch_axis, keepdim=False)
         work_shape = (T,) + spike_aggregated.shape[1:]
     else:
         spike_aggregated = spike_data
@@ -126,12 +127,10 @@ def _cv_torch(
     count_isi = torch.bincount(valid_n, minlength=n_flat).float()
     sum_isi = torch.bincount(valid_n, weights=valid_isis, minlength=n_flat)
     sum_isi_sq = torch.bincount(valid_n, weights=valid_isis**2, minlength=n_flat)
-
-    with torch.no_grad():
-        mean_isi_arr = sum_isi / (count_isi + 1e-12)
-        var_isi_arr = (sum_isi_sq / (count_isi + 1e-12)) - mean_isi_arr**2
-        std_isi_arr = torch.sqrt(torch.clamp(var_isi_arr, min=0.0))
-        cv_values_flat = std_isi_arr / (mean_isi_arr + 1e-12)
+    mean_isi_arr = sum_isi / (count_isi + 1e-12)
+    var_isi_arr = (sum_isi_sq / (count_isi + 1e-12)) - mean_isi_arr**2
+    std_isi_arr = torch.sqrt(torch.clamp(var_isi_arr, min=0.0))
+    cv_values_flat = std_isi_arr / (mean_isi_arr + 1e-12)
 
     cv_values_flat[count_isi < 2] = float("nan")
 
@@ -154,6 +153,7 @@ def _fano_numpy(
     window: int | None,
     overlap: int,
     batch_axis: tuple | None,
+    dtype: np.dtype | None = None,
 ):
     """NumPy implementation of Fano factor."""
     orig_shape = spike.shape
@@ -171,14 +171,15 @@ def _fano_numpy(
 
     # Average across batch dimensions if specified
     if batch_axis is not None:
-        spike = np.mean(spike, axis=tuple(batch_axis), keepdims=False)
+        spike = np.mean(spike, axis=batch_axis, keepdims=False)
 
     flat_spike = spike.reshape(T, -1)
     n_flat = flat_spike.shape[1]
 
     # VECTORIZED WINDOWING via Cumulative Sum
-    cumsum_spike = np.zeros((T + 1, n_flat), dtype=np.float64)
-    np.cumsum(flat_spike, axis=0, dtype=np.float64, out=cumsum_spike[1:])
+    # dtype=None lets numpy use its default (float64)
+    cumsum_spike = np.zeros((T + 1, n_flat), dtype=dtype)
+    np.cumsum(flat_spike, axis=0, dtype=dtype, out=cumsum_spike[1:])
 
     t_starts = np.arange(0, T - window + 1, step)
     t_ends = t_starts + window
@@ -187,7 +188,7 @@ def _fano_numpy(
     mean_counts = counts.mean(axis=0)
     var_counts = counts.var(axis=0, ddof=1)
 
-    fano = np.zeros(n_flat, dtype=float)
+    fano = np.zeros(n_flat, dtype=dtype)
     valid = np.isfinite(mean_counts) & (mean_counts > 0) & np.isfinite(var_counts)
     if np.any(valid):
         fano[valid] = var_counts[valid] / mean_counts[valid]
@@ -201,10 +202,11 @@ def _fano_torch(
     window: int,
     overlap: int,
     batch_axis: tuple | None,
+    dtype: torch.dtype | None = None,
 ):
     """Torch implementation of Fano factor (GPU-friendly).
 
-    Note: Accumulates in float64 for numerical accuracy even with float16 input.
+    Note: Uses specified dtype or input dtype for accumulation.
     """
     device = spike.device
     orig_shape = spike.shape
@@ -215,20 +217,25 @@ def _fano_torch(
 
     step = window - overlap
 
-    # Cast to float64 for accumulation accuracy
-    if spike.dtype in (torch.float16, torch.float32):
-        spike_work = spike.double()
+    # Cast to specified dtype or preserve input dtype for accumulation
+    if dtype is not None:
+        spike_work = spike.to(dtype)
+    elif spike.dtype in (torch.float16, torch.bfloat16):
+        spike_work = spike.float()
     else:
         spike_work = spike
 
     if batch_axis is not None:
-        spike_work = torch.mean(spike_work, dim=tuple(batch_axis), keepdim=False)
+        spike_work = torch.mean(spike_work, dim=batch_axis, keepdim=False)
 
     flat_spike = spike_work.reshape(T, -1)
     n_flat = flat_spike.shape[1]
 
+    # Determine accumulator dtype
+    accum_dtype = dtype if dtype is not None else spike_work.dtype
+
     # Vectorized windowing via cumulative sum (very GPU-friendly)
-    cumsum_spike = torch.zeros(T + 1, n_flat, device=device, dtype=torch.float64)
+    cumsum_spike = torch.zeros(T + 1, n_flat, device=device, dtype=accum_dtype)
     cumsum_spike[1:] = torch.cumsum(flat_spike, dim=0)
 
     t_starts = torch.arange(0, T - window + 1, step, device=device)
@@ -238,7 +245,7 @@ def _fano_torch(
     mean_counts = counts.mean(dim=0)
     var_counts = counts.var(dim=0, unbiased=True)
 
-    fano = torch.zeros(n_flat, device=device, dtype=torch.float64)
+    fano = torch.zeros(n_flat, device=device, dtype=accum_dtype)
     valid = torch.isfinite(mean_counts) & (mean_counts > 0) & torch.isfinite(var_counts)
     if valid.any():
         fano[valid] = var_counts[valid] / mean_counts[valid]
@@ -254,6 +261,7 @@ def _kurtosis_numpy(
     overlap: int,
     fisher: bool,
     batch_axis: tuple | None,
+    dtype: np.dtype | None = None,
 ):
     """NumPy implementation of kurtosis."""
     orig_shape = spike.shape
@@ -266,14 +274,15 @@ def _kurtosis_numpy(
 
     # Average across batch dimensions if specified
     if batch_axis is not None:
-        spike = np.mean(spike, axis=tuple(batch_axis), keepdims=False)
+        spike = np.mean(spike, axis=batch_axis, keepdims=False)
 
     flat_spike = spike.reshape(T, -1)
     n_flat = flat_spike.shape[1]
 
     # VECTORIZED WINDOWING via Cumulative Sum
-    cumsum_spike = np.zeros((T + 1, n_flat), dtype=np.float64)
-    np.cumsum(flat_spike, axis=0, dtype=np.float64, out=cumsum_spike[1:])
+    # dtype=None lets numpy use its default (float64)
+    cumsum_spike = np.zeros((T + 1, n_flat), dtype=dtype)
+    np.cumsum(flat_spike, axis=0, dtype=dtype, out=cumsum_spike[1:])
 
     t_starts = np.arange(0, T - window + 1, step)
     t_ends = t_starts + window
@@ -351,12 +360,25 @@ def _kurtosis_torch(
 # =============================================================================
 
 
+def _cv(
+    spike_data: np.ndarray | torch.Tensor,
+    dt_ms: float = 1.0,
+    batch_axis: tuple[int, ...] | None = None,
+    dtype: np.dtype | torch.dtype | None = None,
+):
+    if isinstance(spike_data, torch.Tensor):
+        return _cv_torch(spike_data, dt_ms, batch_axis, dtype)
+    else:
+        return _cv_numpy(spike_data, dt_ms, batch_axis, dtype)
+
+
 @use_percentiles(value_key="cv")
 @use_stats(value_key="cv")
 def isi_cv(
     spike_data: np.ndarray | torch.Tensor,
     dt_ms: float = 1.0,
-    batch_axis: tuple[int, ...] | None = None,
+    batch_axis: tuple[int, ...] | int | None = None,
+    dtype: np.dtype | torch.dtype | None = None,
 ):
     """Calculate coefficient of variation of ISIs per neuron.
 
@@ -374,6 +396,7 @@ def isi_cv(
         dt_ms: Time step in milliseconds for converting ISI to ms.
         batch_axis: Axes to aggregate ISIs across (e.g., (1, 2) for trials).
             If None, computes CV per element in the non-time dimensions.
+        dtype: Data type for accumulation.
         stat: Aggregation statistic to return instead of per-neuron values.
             Options: "mean", "median", "max", "min", "std", "var", "argmax",
             "argmin", "cv". See [`use_stats()`](btorch/analysis/statistics.py:483).
@@ -393,10 +416,9 @@ def isi_cv(
         info: Dictionary with 'isi_total' (aggregate ISI statistics),
             'isi_stats' (per-neuron statistics), and optional percentile data.
     """
-    if isinstance(spike_data, torch.Tensor):
-        return _cv_torch(spike_data, dt_ms, batch_axis)
-    else:
-        return _cv_numpy(spike_data, dt_ms, batch_axis)
+    if isinstance(batch_axis, int):
+        batch_axis = (batch_axis,)
+    return _cv(spike_data, dt_ms, batch_axis, dtype)
 
 
 @use_percentiles(value_key="fano")
@@ -406,6 +428,7 @@ def fano(
     window: int | None = None,
     overlap: int = 0,
     batch_axis: tuple[int, ...] | int | None = None,
+    dtype: np.dtype | torch.dtype | None = None,
 ):
     """Compute Fano factor for spike trains using optimized cumulative sums.
 
@@ -420,6 +443,8 @@ def fano(
         window: Window size for spike counting. If None, uses full duration T.
         overlap: Overlap between consecutive windows.
         batch_axis: Axes to average across for FF computation (e.g., trials).
+        dtype: Data type for accumulation. If None, uses float64 for NumPy
+            and input dtype (or float32 for float16/bfloat16) for Torch.
         stat: Aggregation statistic to return instead of per-neuron values.
             Options: "mean", "median", "max", "min", "std", "var", "argmax",
             "argmin", "cv". See [`use_stats()`](btorch/analysis/statistics.py:483).
@@ -445,9 +470,9 @@ def fano(
         # Need at least 2 bins for valid variance with unbiased=True
         window = max(1, spike.shape[0] // 10)
     if isinstance(spike, torch.Tensor):
-        return _fano_torch(spike, window, overlap, batch_axis)
+        return _fano_torch(spike, window, overlap, batch_axis, dtype)
     else:
-        return _fano_numpy(spike, window, overlap, batch_axis)
+        return _fano_numpy(spike, window, overlap, batch_axis, dtype)
 
 
 @use_percentiles(value_key="kurtosis")
@@ -587,7 +612,9 @@ def isi_cv_population(
         return _isis_population_numpy(spike_data, dt_ms)
 
 
-def _fano_population_numpy(spike: np.ndarray, window: int | None, overlap: int):
+def _fano_population_numpy(
+    spike: np.ndarray, window: int | None, overlap: int, dtype: np.dtype | None = None
+):
     """NumPy implementation of pooled Fano factor."""
     T = spike.shape[0]
 
@@ -606,8 +633,9 @@ def _fano_population_numpy(spike: np.ndarray, window: int | None, overlap: int):
     pop_counts = flat_spike.sum(axis=1)
 
     # VECTORIZED WINDOWING via Cumulative Sum
-    cumsum = np.zeros(T + 1, dtype=np.float64)
-    np.cumsum(pop_counts, dtype=np.float64, out=cumsum[1:])
+    # dtype=None lets numpy use its default (float64)
+    cumsum = np.zeros(T + 1, dtype=dtype)
+    np.cumsum(pop_counts, dtype=dtype, out=cumsum[1:])
 
     t_starts = np.arange(0, T - window + 1, step)
     t_ends = t_starts + window
@@ -621,7 +649,12 @@ def _fano_population_numpy(spike: np.ndarray, window: int | None, overlap: int):
     return np.array(fano_pop), {"window": window, "n_windows": len(counts)}
 
 
-def _fano_population_torch(spike: torch.Tensor, window: int | None, overlap: int):
+def _fano_population_torch(
+    spike: torch.Tensor,
+    window: int | None,
+    overlap: int,
+    dtype: torch.dtype | None = None,
+):
     """Torch implementation of pooled Fano factor."""
     device = spike.device
     T = spike.shape[0]
@@ -640,8 +673,11 @@ def _fano_population_torch(spike: torch.Tensor, window: int | None, overlap: int
     # Sum across all neurons to get population spike count
     pop_counts = flat_spike.sum(dim=1)
 
+    # Use specified dtype or default to float64
+    accum_dtype = dtype if dtype is not None else torch.float64
+
     # Vectorized windowing via cumulative sum
-    cumsum = torch.zeros(T + 1, device=device, dtype=torch.float64)
+    cumsum = torch.zeros(T + 1, device=device, dtype=accum_dtype)
     cumsum[1:] = torch.cumsum(pop_counts, dim=0)
 
     t_starts = torch.arange(0, T - window + 1, step, device=device)
@@ -801,7 +837,8 @@ def cv_temporal(
     dt_ms: float = 1.0,
     window: int = 100,
     step: int = 1,
-    batch_axis: tuple[int, ...] | None = None,
+    batch_axis: tuple[int, ...] | int | None = None,
+    dtype: np.dtype | torch.dtype | None = None,
 ):
     """Compute CV in sliding temporal windows.
 
@@ -814,24 +851,34 @@ def cv_temporal(
         window: Size of the sliding window in time steps.
         step: Step size between consecutive windows.
         batch_axis: Axes to aggregate across (e.g., (1, 2) for trials).
+        dtype: Data type for output arrays. If None, uses float64 for NumPy
+            and float32 for Torch.
 
     Returns:
         cv_temporal: CV values for each window. Shape: [n_windows, ...]
             where n_windows = (T - window) // step + 1.
         info: Dictionary with window boundaries.
     """
+    if isinstance(batch_axis, int):
+        batch_axis = (batch_axis,)
+
     T = spike_data.shape[0]
     n_windows = (T - window) // step + 1
 
+    # Determine output dtype
     if isinstance(spike_data, torch.Tensor):
+        out_dtype = dtype if dtype is not None else torch.float32
         cv_values = torch.full(
             (n_windows,) + spike_data.shape[1:],
             float("nan"),
-            dtype=torch.float64,
+            dtype=out_dtype,
             device=spike_data.device,
         )
     else:
-        cv_values = np.full((n_windows,) + spike_data.shape[1:], np.nan, dtype=float)
+        out_dtype = dtype if dtype is not None else float
+        cv_values = np.full(
+            (n_windows,) + spike_data.shape[1:], np.nan, dtype=out_dtype
+        )
 
     for i in range(n_windows):
         start = i * step
@@ -841,12 +888,8 @@ def cv_temporal(
 
         window_data = spike_data[start:end]
 
-        if isinstance(window_data, torch.Tensor):
-            cv_window, _ = _cv_torch(window_data, dt_ms, batch_axis)
-            cv_values[i] = cv_window
-        else:
-            cv_window, _ = _cv_numpy(window_data, dt_ms, batch_axis)
-            cv_values[i] = cv_window
+        cv_window, _ = _cv(window_data, dt_ms, batch_axis, dtype)
+        cv_values[i] = cv_window
 
     window_starts = np.arange(n_windows) * step * dt_ms
     window_ends = window_starts + window * dt_ms
@@ -927,7 +970,8 @@ def fano_sweep(
     spike: np.ndarray | torch.Tensor,
     window: int | tuple[int, ...] | None = None,
     overlap: int = 0,
-    batch_axis: tuple[int, ...] | None = None,
+    batch_axis: tuple[int, ...] | int | None = None,
+    dtype: np.dtype | torch.dtype | None = None,
 ):
     """Compute Fano factor sweeping over window sizes.
 
@@ -949,6 +993,8 @@ def fano_sweep(
             - None: auto-determine as (1, T//20, 1)
         overlap: Overlap between consecutive windows.
         batch_axis: Axes to average across (e.g., trials).
+        dtype: Data type for output arrays. If None, uses float64 for NumPy
+            and float32 for Torch.
 
     Returns:
         fano_sweep: Fano factor values for each window size.
@@ -963,6 +1009,8 @@ def fano_sweep(
         >>> # Sweep window sizes 20, 30, 40, 50
         >>> fano_sweep(spike, window=(20, 51, 1))
     """
+    if isinstance(batch_axis, int):
+        batch_axis = (batch_axis,)
     T = spike.shape[0]
 
     # Parse window specification following arange semantics
@@ -1021,6 +1069,7 @@ def _lv_numpy(
     spike_data: np.ndarray,
     dt_ms: float,
     batch_axis: tuple | None,
+    dtype: np.dtype | None = None,
 ):
     """NumPy implementation of Local Variation."""
     orig_shape = spike_data.shape
@@ -1028,8 +1077,7 @@ def _lv_numpy(
 
     # Aggregate across batch dimensions if specified
     if batch_axis is not None:
-        axes_to_sum = tuple(batch_axis)
-        spike_aggregated = np.sum(spike_data, axis=axes_to_sum, keepdims=False)
+        spike_aggregated = np.sum(spike_data, axis=batch_axis, keepdims=False)
         work_shape = (T,) + spike_aggregated.shape[1:]
     else:
         spike_aggregated = spike_data
@@ -1216,23 +1264,28 @@ def firing_rate(
 
     Supports input shapes like [T, ...].
     If axis is not None, averages over the specified dimensions before smoothing.
+
+    Args:
+        spikes: Spike train array of shape [T, ...].
+        width: Smoothing window width. If None or 0, no smoothing is applied.
+        dt: Time step in milliseconds. If None, defaults to 1.0.
+        axis: Axes to average over before smoothing. Can be int or tuple of ints.
+
+    Returns:
+        firing_rates: Smoothed firing rates with same shape as input (minus
+            averaged axes if axis is specified).
     """
     if dt is None:
         dt = 1.0
 
     if axis is not None:
+        # Normalize axis to tuple for consistent handling
+        if isinstance(axis, int):
+            axis = (axis,)
         if isinstance(spikes, np.ndarray):
             spikes = spikes.mean(axis=axis)
         else:
-            # torch.mean expects tuple for multiple dims
-            dim = (
-                axis
-                if isinstance(axis, tuple)
-                else (axis,)
-                if isinstance(axis, int)
-                else tuple(axis)
-            )
-            spikes = spikes.mean(dim=dim)
+            spikes = spikes.mean(dim=axis)
 
     if width is None or width == 0:
         return spikes / dt
@@ -1240,6 +1293,8 @@ def firing_rate(
     width1 = int(width // 2) * 2 + 1
 
     if isinstance(spikes, np.ndarray):
+        if spikes.dtype == np.float16:
+            spikes = spikes.astype(np.float32)
         window = np.ones(width1, dtype=float) / width1
         # Convolve along time axis (0) for all other dimensions
         out = convolve1d(spikes, window, axis=0, mode="constant", cval=0.0)

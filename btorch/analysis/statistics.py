@@ -73,14 +73,13 @@ def compute_percentiles(
     if isinstance(values, torch.Tensor):
         # Use torch.quantile for tensor inputs (preserves device/dtype)
         values_flat = values.flatten()
+        if values_flat.dtype == torch.float16:
+            values_flat = values_flat.to(torch.float32)
         # torch.quantile takes quantiles in [0, 1] range directly
-        if len(levels) == 1:
-            perc_values = [torch.quantile(values_flat, levels[0] / 100).item()]
-        else:
-            perc_values = torch.quantile(
-                values_flat,
-                torch.tensor([p / 100 for p in levels], device=values.device),
-            ).tolist()
+        perc_values = torch.quantile(
+            values_flat,
+            torch.tensor([p / 100 for p in levels], device=values.device),
+        ).tolist()
     else:
         # Use numpy for array inputs
         values_flat = np.asarray(values).flatten()
