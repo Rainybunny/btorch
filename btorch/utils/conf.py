@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
@@ -9,13 +9,16 @@ def load_config(
     Param,
     use_config_file=True,
     search_path=Path("."),
-    argv: list[str] | None = None,
+    argv_arglist: list[str] | None = None,
     return_cli=False,
     make_concrete: bool = True,
 ):
     """Doesn't support help text and Literal though."""
     defaults = OmegaConf.structured(Param)
-    cli_cfg_ = cli_cfg = OmegaConf.from_cli()
+    if argv_arglist is None:
+        cli_cfg_ = cli_cfg = OmegaConf.from_cli()
+    else:
+        cli_cfg_ = cli_cfg = OmegaConf.from_cli(argv_arglist)
     if use_config_file and "config_path" in cli_cfg:
         assert "config_path" not in Param.__dataclass_fields__
         config_path = Path(cli_cfg.config_path)
@@ -29,6 +32,9 @@ def load_config(
     else:
         cfg_cli_file = OmegaConf.create()
     cfg = OmegaConf.unsafe_merge(defaults, cfg_cli_file, cli_cfg)
+    # workaround for from_cli doesn't treat integer index as dict key in some cases.
+    # cli_dotlist = to_dotlist(cli_cfg, use_equal=True)
+    # cfg.merge_with_dotlist(cli_dotlist)
     if make_concrete:
         cfg = OmegaConf.to_object(cfg)
 
@@ -154,7 +160,7 @@ def to_dotlist(
 
 
 def diff_conf(
-    conf_a: DictConfig | ListConfig,
+    conf_a: DictConfig | ListConfig | Any,
     conf_b: DictConfig | ListConfig,
     mode: (Iterable[Literal["changed", "added", "removed"]] | None) = None,
 ) -> DictConfig | ListConfig:
@@ -166,9 +172,9 @@ def diff_conf(
     """
 
     if not isinstance(conf_a, (DictConfig, ListConfig)):
-        raise TypeError("diff_conf expects conf_a to be DictConfig or ListConfig.")
+        conf_a = OmegaConf.structured(conf_a)
     if not isinstance(conf_b, (DictConfig, ListConfig)):
-        raise TypeError("diff_conf expects conf_b to be DictConfig or ListConfig.")
+        conf_b = OmegaConf.structured(conf_b)
 
     records = diff_conf_records(conf_a, conf_b, mode=mode)
 
@@ -283,18 +289,38 @@ def diff_conf_records(
     added_values: dict[str, object] = {}
     removed_values: dict[str, object] = {}
 
+    # Use plain containers so structured union explicit type metadata (`_type_`)
+    # emitted by OmegaConf is visible to the recursive diff.
+    plain_a = OmegaConf.to_container(conf_a, resolve=False)
+    plain_b = OmegaConf.to_container(conf_b, resolve=False)
+
     def _is_container(node) -> bool:
-        return isinstance(node, (DictConfig, ListConfig))
+        return isinstance(node, (dict, list))
+
+    def _select_plain(node, path: str):
+        if path == "<root>":
+            return node
+
+        cur = node
+        for token in path.split("."):
+            if isinstance(cur, dict):
+                cur = cur[token]
+                continue
+            if isinstance(cur, list):
+                cur = cur[int(token)]
+                continue
+            raise KeyError(f"Cannot descend through scalar at token '{token}'.")
+        return cur
 
     def _collect_leaf_paths(node, path: str) -> set[str]:
-        if isinstance(node, DictConfig):
+        if isinstance(node, dict):
             out: set[str] = set()
             for key, value in node.items():
                 new_path = f"{path}.{key}" if path else str(key)
                 out |= _collect_leaf_paths(value, new_path)
             return out
 
-        if isinstance(node, ListConfig):
+        if isinstance(node, list):
             out = set()
             for idx, value in enumerate(node):
                 new_path = f"{path}.{idx}" if path else str(idx)
@@ -304,7 +330,19 @@ def diff_conf_records(
         return {path} if path else {"<root>"}
 
     def _walk(a_node, b_node, path: str = ""):
-        if isinstance(a_node, DictConfig) and isinstance(b_node, DictConfig):
+        if isinstance(a_node, dict) and isinstance(b_node, dict):
+            # Structured union switch: treat as full subtree replacement so old
+            # type keys are discarded in one step.
+            if (
+                "_type_" in a_node
+                and "_type_" in b_node
+                and a_node["_type_"] != b_node["_type_"]
+            ):
+                key = path if path else "<root>"
+                changed.add(key)
+                changed_values[key] = (a_node, b_node)
+                return
+
             keys_a = set(a_node.keys())
             keys_b = set(b_node.keys())
 
@@ -313,21 +351,21 @@ def diff_conf_records(
                 leaf_paths = _collect_leaf_paths(a_node[key], key_path)
                 removed.update(leaf_paths)
                 for leaf_path in leaf_paths:
-                    removed_values[leaf_path] = OmegaConf.select(conf_a, leaf_path)
+                    removed_values[leaf_path] = _select_plain(plain_a, leaf_path)
 
             for key in keys_b - keys_a:
                 key_path = f"{path}.{key}" if path else str(key)
                 leaf_paths = _collect_leaf_paths(b_node[key], key_path)
                 added.update(leaf_paths)
                 for leaf_path in leaf_paths:
-                    added_values[leaf_path] = OmegaConf.select(conf_b, leaf_path)
+                    added_values[leaf_path] = _select_plain(plain_b, leaf_path)
 
             for key in keys_a & keys_b:
                 key_path = f"{path}.{key}" if path else str(key)
                 _walk(a_node[key], b_node[key], key_path)
             return
 
-        if isinstance(a_node, ListConfig) and isinstance(b_node, ListConfig):
+        if isinstance(a_node, list) and isinstance(b_node, list):
             len_a = len(a_node)
             len_b = len(b_node)
             common = min(len_a, len_b)
@@ -341,14 +379,14 @@ def diff_conf_records(
                 leaf_paths = _collect_leaf_paths(a_node[idx], key_path)
                 removed.update(leaf_paths)
                 for leaf_path in leaf_paths:
-                    removed_values[leaf_path] = OmegaConf.select(conf_a, leaf_path)
+                    removed_values[leaf_path] = _select_plain(plain_a, leaf_path)
 
             for idx in range(common, len_b):
                 key_path = f"{path}.{idx}" if path else str(idx)
                 leaf_paths = _collect_leaf_paths(b_node[idx], key_path)
                 added.update(leaf_paths)
                 for leaf_path in leaf_paths:
-                    added_values[leaf_path] = OmegaConf.select(conf_b, leaf_path)
+                    added_values[leaf_path] = _select_plain(plain_b, leaf_path)
             return
 
         if _is_container(a_node) != _is_container(b_node):
@@ -362,7 +400,46 @@ def diff_conf_records(
             changed.add(key)
             changed_values[key] = (a_node, b_node)
 
-    _walk(conf_a, conf_b)
+    _walk(plain_a, plain_b)
+
+    def _is_under(key: str, parent: str) -> bool:
+        if parent == "<root>":
+            return True
+        return key == parent or key.startswith(f"{parent}.")
+
+    # If explicit union type changed ("..._type_"), collapse that subtree into a
+    # single changed record at the parent path. This avoids emitting stale
+    # per-leaf removals for the previous union member.
+    union_switch_parents: set[str] = set()
+    for key in changed:
+        if key == "_type_":
+            union_switch_parents.add("<root>")
+            continue
+        if key.endswith("._type_"):
+            union_switch_parents.add(key.rsplit(".", 1)[0])
+
+    for parent in sorted(union_switch_parents, key=lambda p: (p != "<root>", p)):
+        for key in list(changed):
+            if _is_under(key, parent):
+                changed.remove(key)
+                changed_values.pop(key, None)
+        for key in list(added):
+            if _is_under(key, parent):
+                added.remove(key)
+                added_values.pop(key, None)
+        for key in list(removed):
+            if _is_under(key, parent):
+                removed.remove(key)
+                removed_values.pop(key, None)
+
+        changed.add(parent)
+        if parent == "<root>":
+            changed_values[parent] = (plain_a, plain_b)
+        else:
+            changed_values[parent] = (
+                _select_plain(plain_a, parent),
+                _select_plain(plain_b, parent),
+            )
 
     out: set[str] = set()
     if "changed" in mode_set:
@@ -396,8 +473,7 @@ def diff_conf_dotlist(
 
     For ``added`` and ``changed`` entries, this emits ``"path=value"``.
     For ``removed`` entries (when moded by ``mode``), this emits
-    ``"{removed_prefix}path"``. By default this produces Hydra-style remove
-    overrides such as ``"~model.dropout"``.
+    ``"{removed_prefix}path"``.
     """
 
     records = diff_conf_records(conf_a, conf_b, mode=mode)
@@ -421,3 +497,26 @@ def diff_conf_dotlist(
         dotlist.append(f"{key}={value}")
 
     return dotlist
+
+
+def get_dotkey(obj: Any, key: str, default=None):
+    """Get attribute by dot key."""
+    if isinstance(obj, (DictConfig, ListConfig)):
+        return OmegaConf.select(obj, key, default=default)
+    try:
+        for part in key.split("."):
+            obj = getattr(obj, part)
+        return obj
+    except AttributeError:
+        return default
+
+
+def set_dotkey(obj: Any, key: str, value):
+    """Set attribute by dot key."""
+    if isinstance(obj, (DictConfig, ListConfig)):
+        OmegaConf.update(obj, key, value)
+        return
+    parts = key.split(".")
+    for part in parts[:-1]:
+        obj = getattr(obj, part)
+    setattr(obj, parts[-1], value)

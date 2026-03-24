@@ -56,6 +56,28 @@ class BatchArgConf:
     max_concurrent: int = 64
 
 
+@dataclass
+class UnionOptA:
+    value: int = 1
+    legacy: str = "old"
+
+
+@dataclass
+class UnionOptB:
+    value: int = 1
+    tag: str = "b"
+
+
+@dataclass
+class StructuredUnionConf:
+    item: UnionOptA | UnionOptB = field(default_factory=UnionOptA)
+
+
+@dataclass
+class PrimitiveUnionConf:
+    item: int | str = 1
+
+
 def test_load_config_merges_file_and_cli(tmp_path, monkeypatch):
     """Mimics the single.py usage: config file + CLI overrides."""
     cfg_file = tmp_path / "config.yaml"
@@ -284,13 +306,13 @@ def test_diff_conf_mode_filters_are_intentional_and_directional():
         }
     )
 
-    assert OmegaConf.to_container(diff_conf(conf_a, conf_b, include={"changed"})) == {
+    assert OmegaConf.to_container(diff_conf(conf_a, conf_b, mode={"changed"})) == {
         "seed": 2,
         "optim": {"lr": 5e-4},
     }
 
     assert OmegaConf.to_container(
-        diff_conf(conf_a, conf_b, include={"added", "changed"})
+        diff_conf(conf_a, conf_b, mode={"added", "changed"})
     ) == {
         "seed": 2,
         "optim": {"lr": 5e-4},
@@ -298,7 +320,7 @@ def test_diff_conf_mode_filters_are_intentional_and_directional():
     }
 
     assert OmegaConf.to_container(
-        diff_conf(conf_a, conf_b, include={"removed", "changed"})
+        diff_conf(conf_a, conf_b, mode={"removed", "changed"})
     ) == {
         "seed": 2,
         "optim": {"lr": 5e-4, "weight_decay": None},
@@ -313,16 +335,13 @@ def test_diff_conf_mode_filters_are_intentional_and_directional():
     }
 
 
-def test_diff_conf_rejects_non_omegaconf_inputs():
-    """Input validation should fail loudly to avoid silent mis-comparisons."""
+def test_diff_conf_accepts_plain_inputs_via_structured_conversion():
+    """diff_conf should accept plain objects by structuring them internally."""
 
     conf = OmegaConf.create({"a": 1})
 
-    with pytest.raises(TypeError):
-        diff_conf({"a": 1}, conf)
-
-    with pytest.raises(TypeError):
-        diff_conf(conf, {"a": 1})
+    assert OmegaConf.to_container(diff_conf({"a": 1}, conf)) == {}
+    assert OmegaConf.to_container(diff_conf(conf, {"a": 1})) == {}
 
 
 def test_diff_conf_records_captures_status_and_old_new_values_for_spawning():
@@ -415,3 +434,37 @@ def test_diff_conf_integrates_with_to_dotlist_for_worker_overrides():
         "single.solver.plot_filename=run42.png",
         "single.common.tag=null",
     }
+
+
+def test_diff_conf_records_supports_structured_union_type_switch():
+    """Structured union switch should be a full subtree replacement."""
+
+    conf_a = OmegaConf.structured(StructuredUnionConf(item=UnionOptA(value=7)))
+    conf_b = OmegaConf.structured(
+        StructuredUnionConf(item=UnionOptB(value=7, tag="new"))
+    )
+
+    records = diff_conf_records(conf_a, conf_b)
+
+    assert records["item"]["status"] == "changed"
+    assert "UnionOptA" in str(records["item"]["old"])
+    assert "UnionOptB" in str(records["item"]["new"])
+    assert "item.legacy" not in records
+
+
+def test_diff_conf_supports_union_values_for_structured_and_primitives():
+    """diff_conf should replace a switched union subtree and drop old keys."""
+
+    conf_a = OmegaConf.structured(StructuredUnionConf(item=UnionOptA(value=7)))
+    conf_b = OmegaConf.structured(
+        StructuredUnionConf(item=UnionOptB(value=7, tag="new"))
+    )
+
+    diff_structured = OmegaConf.to_container(diff_conf(conf_a, conf_b))
+    assert str(diff_structured["item"]["_type_"]).endswith("UnionOptB")
+    assert diff_structured["item"]["tag"] == "new"
+    assert "legacy" not in diff_structured["item"]
+
+    prim_a = OmegaConf.structured(PrimitiveUnionConf(item=1))
+    prim_b = OmegaConf.structured(PrimitiveUnionConf(item="1"))
+    assert OmegaConf.to_container(diff_conf(prim_a, prim_b)) == {"item": "1"}
