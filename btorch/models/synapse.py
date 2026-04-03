@@ -3,10 +3,17 @@ from typing import Protocol
 
 import pandas as pd
 import torch
+from jaxtyping import Float
+from torch import Tensor, nn
 
 from ..types import TensorLike
 from . import environ
-from .base import MemoryModule, normalize_n_neuron
+from .base import (
+    MemoryModule,
+    flatten_neuron,
+    normalize_n_neuron,
+    unflatten_neuron,
+)
 from .ode import exp_euler_step
 
 
@@ -117,17 +124,12 @@ class BasePSC(MemoryModule):
         return f" step_mode={self.step_mode}, backend={self.backend}"
 
     def _flatten_neuron(self, x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]]:
-        if len(self.n_neuron) == 1:
-            return x, x.shape[:-1]
-        leading = x.shape[: -len(self.n_neuron)]
-        return x.reshape(*leading, self.size), leading
+        return flatten_neuron(x, self.n_neuron, self.size)
 
     def _unflatten_neuron(
         self, x: torch.Tensor, leading_shape: tuple[int, ...]
     ) -> torch.Tensor:
-        if len(self.n_neuron) == 1:
-            return x
-        return x.reshape(*leading_shape, *self.n_neuron)
+        return unflatten_neuron(x, leading_shape, self.n_neuron)
 
     def conductance_charge(self):
         raise NotImplementedError()
@@ -480,3 +482,130 @@ class HeterSynapsePSC(BasePSC):
             raise ValueError("NaN values detected in PSC tensor")
 
         return result
+
+
+class GapJunction(nn.Module):
+    """Electrical synapse (gap junction) for direct coupling between neurons.
+
+    Gap junctions allow ion flow between connected neurons proportional to
+    the voltage difference. The current is computed as:
+
+        I_gap = g_gap * linear(v_post - v_pre)
+
+    where `linear` models both the connection topology and conductance weights.
+    Unlike chemical synapses, gap junctions are instantaneous (no delay or
+    synaptic dynamics) and bidirectional.
+
+    Args:
+        n_neuron: Number of neurons.
+        g_gap: Global scaling factor for gap junction conductance. Default: 1.0.
+        linear: Linear layer for weight application (models connection and
+            conductance). If None, an identity weight matrix is used.
+            Default: None.
+        step_mode: Step mode. Default: "s".
+        backend: Compute backend. Default: "torch".
+
+    Attributes:
+        g_gap: Gap junction global scaling factor.
+        linear: Linear transformation for connection weights.
+
+    Example:
+        >>> gap = GapJunction(n_neuron=4, g_gap=0.1)
+        >>> v_pre = torch.randn(2, 4)   # pre-synaptic voltage (mV)
+        >>> v_post = torch.randn(2, 4)  # post-synaptic voltage (mV)
+        >>> i_gap = gap(v_pre, v_post)  # gap junction current (pA)
+    """
+
+    n_neuron: tuple[int, ...]
+    size: int
+    g_gap: torch.Tensor
+
+    def __init__(
+        self,
+        n_neuron: int | Sequence[int],
+        g_gap: float | TensorLike = 1.0,
+        linear: torch.nn.Module | None = None,
+        step_mode: str = "s",
+        backend: str = "torch",
+    ):
+        super().__init__()
+
+        self.n_neuron, self.size = normalize_n_neuron(n_neuron)
+        self.step_mode = step_mode
+        self.backend = backend
+
+        # Register global scaling factor as buffer (non-trainable by default)
+        self.register_buffer("g_gap", torch.as_tensor(g_gap))
+
+        # Linear layer for connection weights (models both connection and conductance)
+        if linear is None:
+            self.linear = torch.nn.Linear(self.size, self.size, bias=False)
+            torch.nn.init.uniform_(self.linear.weight)
+        else:
+            self.linear = linear
+
+    def extra_repr(self) -> str:
+        return (
+            f"n_neuron={self.n_neuron}, g_gap={self.g_gap.item():.4g}, "
+            f"step_mode={self.step_mode}, backend={self.backend}"
+        )
+
+    def forward(
+        self,
+        v_pre: Float[Tensor, "*batch n_neuron"],
+        v_post: Float[Tensor, "*batch n_neuron"],
+    ) -> Float[Tensor, "*batch n_neuron"]:
+        """Compute gap junction current from voltage difference.
+
+        Args:
+            v_pre: Pre-synaptic membrane potential (mV).
+            v_post: Post-synaptic membrane potential (mV).
+
+        Returns:
+            Gap junction current I_gap = g_gap * linear(v_post - v_pre) (pA).
+        """
+        v_pre_flat, leading = flatten_neuron(v_pre, self.n_neuron, self.size)
+        v_post_flat, _ = flatten_neuron(v_post, self.n_neuron, self.size)
+
+        # Current is proportional to weighted voltage difference
+        # linear models both connection topology and conductance
+        delta_v_flat = v_post_flat - v_pre_flat
+        i_gap_flat = self.g_gap * self.linear(delta_v_flat)
+
+        return unflatten_neuron(i_gap_flat, leading, self.n_neuron)
+
+    def single_step_forward(
+        self,
+        v_pre: Float[Tensor, "*batch n_neuron"],
+        v_post: Float[Tensor, "*batch n_neuron"],
+    ) -> Float[Tensor, "*batch n_neuron"]:
+        """Single step forward (alias for forward)."""
+        return self.forward(v_pre, v_post)
+
+    def multi_step_forward(
+        self,
+        v_pre_seq: Float[Tensor, "T *batch n_neuron"],
+        v_post_seq: Float[Tensor, "T *batch n_neuron"],
+    ) -> Float[Tensor, "T *batch n_neuron"]:
+        """Multi-step forward over time dimension.
+
+        Args:
+            v_pre_seq: Pre-synaptic voltage sequence (T, *batch, n_neuron).
+            v_post_seq: Post-synaptic voltage sequence (T, *batch, n_neuron).
+
+        Returns:
+            Gap junction current sequence (T, *batch, n_neuron).
+        """
+        T = v_pre_seq.shape[0]
+        i_seq = []
+        for t in range(T):
+            i_gap = self.forward(v_pre_seq[t], v_post_seq[t])
+            i_seq.append(i_gap)
+        return torch.stack(i_seq)
+
+
+class VoltageCoupling(GapJunction):
+    """Alias for GapJunction, emphasizing voltage coupling role of gap
+    junctions in compartment models."""
+
+    pass

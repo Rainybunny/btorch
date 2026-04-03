@@ -36,6 +36,43 @@ def normalize_n_neuron(
     return n_neuron, size
 
 
+def flatten_neuron(
+    x: torch.Tensor, n_neuron: tuple[int, ...], size: int
+) -> tuple[torch.Tensor, tuple[int, ...]]:
+    """Flatten trailing neuron dimensions for linear transformation.
+
+    Args:
+        x: Input tensor with trailing neuron dimensions.
+        n_neuron: Neuron dimension sizes.
+        size: Flattened size (product of n_neuron).
+
+    Returns:
+        Tuple of (flattened_tensor, leading_shape).
+    """
+    if len(n_neuron) == 1:
+        return x, x.shape[:-1]
+    leading = x.shape[: -len(n_neuron)]
+    return x.reshape(*leading, size), leading
+
+
+def unflatten_neuron(
+    x: torch.Tensor, leading_shape: tuple[int, ...], n_neuron: tuple[int, ...]
+) -> torch.Tensor:
+    """Restore neuron dimensions after linear transformation.
+
+    Args:
+        x: Flattened tensor.
+        leading_shape: Leading batch dimensions.
+        n_neuron: Neuron dimension sizes.
+
+    Returns:
+        Tensor with restored neuron dimensions.
+    """
+    if len(n_neuron) == 1:
+        return x
+    return x.reshape(*leading_shape, *n_neuron)
+
+
 ResetValueType = Callable | np.ndarray | torch.Tensor | None
 
 
