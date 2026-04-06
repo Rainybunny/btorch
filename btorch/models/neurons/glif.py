@@ -16,6 +16,7 @@ References:
 """
 
 from collections.abc import Callable, Sequence
+from numbers import Number
 from typing import Any, Literal
 
 import torch
@@ -191,28 +192,34 @@ class GLIF3(BaseNode):
             self._v_rest = None
 
         # Handle after-spike currents.
-        if isinstance(asc_amps, float):
+        if isinstance(asc_amps, Number):
             asc_amps = [asc_amps]
-        if isinstance(k, float):
+        if isinstance(k, Number):
             k = [k]
 
-        n_asc = len(asc_amps)
+        resolved_asc_sizes = self.def_param_resolve_sizes(
+            k,
+            asc_amps,
+            sizes=self.n_neuron + (None,),
+        )
+        self.n_Iasc: int = resolved_asc_sizes[-1]
+
         self.def_param(
             "k",
             k,
-            sizes=self.n_neuron + (n_asc,),
+            sizes=resolved_asc_sizes,
             trainable_param=self.trainable_param,
+            normalize_to_sizes=True,
             **_factory_kwargs,
         )
         self.def_param(
             "asc_amps",
             asc_amps,
-            sizes=self.n_neuron + (n_asc,),
+            sizes=resolved_asc_sizes,
             trainable_param=self.trainable_param,
+            normalize_to_sizes=True,
             **_factory_kwargs,
         )
-
-        self.n_Iasc: int = self.asc_amps.shape[-1]
 
         self.register_memory(
             "Iasc",

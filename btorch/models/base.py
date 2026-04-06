@@ -23,6 +23,18 @@ def is_broadcastable(shape_from, shape_to):
         return False
 
 
+@dataclass
+class PreparedParam:
+    """Intermediate parameter definition before module registration."""
+
+    name: str
+    value: torch.Tensor
+    sizes: tuple[int, ...]
+    is_trainable: bool
+    trainable_shape: str
+    allow_compact: bool
+
+
 class ParamBufferMixin(torch.nn.Module):
     """Standard parameter/buffer definition and load-shape behavior.
 
@@ -30,7 +42,8 @@ class ParamBufferMixin(torch.nn.Module):
     minimal broadcastable form (to save memory) or as full arrays. Supports:
     - easy trainable definition via one argument: `trainable_param`
     - optional trainable shape policy (`trainable_shape="scalar"|"full"|"auto"`)
-    - stable `load_state_dict` behavior for uniform vs non-uniform tensors
+    - extend `load_state_dict` for loading non-uniform full tensors
+        on uniform scalar buffer
     """
 
     def __init__(self, *args, **kwargs):
@@ -40,17 +53,116 @@ class ParamBufferMixin(torch.nn.Module):
         # name -> whether compact scalar save/load is allowed
         self._param_allow_compact: dict[str, bool] = {}
 
-    def def_param(
+    def _resolve_is_trainable(
+        self,
+        name: str,
+        trainable_param: bool | set[str] | None = None,
+    ) -> bool:
+        if isinstance(trainable_param, bool):
+            return trainable_param
+        if isinstance(trainable_param, set):
+            return name in trainable_param
+        if hasattr(self, "trainable_param"):
+            return name in getattr(self, "trainable_param")
+        return False
+
+    @staticmethod
+    def _resolve_sizes_spec_for_value(
+        val, sizes_spec: tuple[int | None, ...]
+    ) -> tuple[int, ...]:
+        none_axes = [idx for idx, dim in enumerate(sizes_spec) if dim is None]
+        if len(none_axes) > 1:
+            raise ValueError(
+                f"At most one inferred dimension is supported, got sizes={sizes_spec}."
+            )
+
+        if len(none_axes) == 0:
+            resolved: list[int] = []
+            for dim in sizes_spec:
+                if dim is None:
+                    raise ValueError(
+                        f"Unexpected unresolved dimension in sizes={sizes_spec}."
+                    )
+                resolved.append(int(dim))
+            return tuple(resolved)
+
+        infer_axis = none_axes[0]
+        inferred_dim = 1
+        val_tensor = torch.as_tensor(val)
+
+        if val_tensor.ndim == len(sizes_spec):
+            inferred_dim = int(val_tensor.shape[infer_axis])
+        elif infer_axis == len(sizes_spec) - 1 and val_tensor.ndim > infer_axis:
+            inferred_dim = int(val_tensor.shape[-1])
+        elif infer_axis == len(sizes_spec) - 1:
+            known_prefix = tuple(int(dim) for dim in sizes_spec[:-1] if dim is not None)
+            prefix_prod = int(np.prod(known_prefix)) if known_prefix else 1
+            if (
+                prefix_prod > 0
+                and val_tensor.ndim == 1
+                and val_tensor.numel() % prefix_prod == 0
+            ):
+                inferred_dim = max(1, int(val_tensor.numel() // prefix_prod))
+            elif val_tensor.ndim > 0:
+                inferred_dim = int(val_tensor.shape[-1])
+
+        resolved_sizes: list[int] = []
+        for dim in sizes_spec:
+            if dim is None:
+                resolved_sizes.append(inferred_dim)
+            else:
+                resolved_sizes.append(int(dim))
+        return tuple(resolved_sizes)
+
+    def def_param_resolve_sizes(
+        self,
+        *vals,
+        sizes: tuple[int | None, ...] | None = None,
+    ) -> tuple[int, ...]:
+        """Resolve a concrete size tuple from one or more values.
+
+        If ``sizes`` contains one ``None`` axis, this method infers that axis
+        per value and returns the broadcast-compatible maximum across values.
+        """
+        if sizes is None:
+            if not hasattr(self, "n_neuron"):
+                raise ValueError("sizes is required when module has no n_neuron.")
+            sizes = tuple(getattr(self, "n_neuron"))
+
+        sizes_spec = tuple(sizes)
+        if len(vals) == 0:
+            return self._resolve_sizes_spec_for_value(0.0, sizes_spec)
+
+        resolved_list = [
+            self._resolve_sizes_spec_for_value(v, sizes_spec) for v in vals
+        ]
+        target = list(resolved_list[0])
+        for resolved in resolved_list[1:]:
+            if len(resolved) != len(target):
+                raise ValueError("Resolved sizes must have the same rank.")
+            for axis in range(len(target)):
+                d0, d1 = target[axis], resolved[axis]
+                dmax = max(d0, d1)
+                if d0 not in (1, dmax) or d1 not in (1, dmax):
+                    raise ValueError(
+                        f"Incompatible resolved sizes at axis {axis}: "
+                        f"{tuple(target)} vs {resolved}."
+                    )
+                target[axis] = dmax
+        return tuple(target)
+
+    def def_param_prepare(
         self,
         name: str,
         val,
         *,
-        sizes: tuple[int, ...] | None = None,
+        sizes: tuple[int | None, ...] | None = None,
         trainable_param: bool | set[str] | None = None,
         trainable_shape: str = "auto",
+        normalize_to_sizes: bool = False,
         **kwargs,
-    ):
-        """Define a trainable parameter or persistent buffer.
+    ) -> PreparedParam:
+        """Build a parameter definition without registering it.
 
         Args:
             name: Attribute name.
@@ -65,26 +177,24 @@ class ParamBufferMixin(torch.nn.Module):
                 - ``"auto"``: keep provided shape
                 - ``"scalar"``: require uniform value and store as scalar
                 - ``"full"``: store as full tensor with ``sizes``
+            normalize_to_sizes: If True, broadcast and materialize value to
+                ``sizes`` (ignored for ``trainable_shape="scalar"``).
             **kwargs: Passed to :func:`torch.as_tensor`.
 
         Raises:
             ValueError: If the value shape is not broadcastable to ``sizes``.
+
+        Returns:
+            Prepared parameter metadata and tensor value.
         """
         if sizes is None:
             if not hasattr(self, "n_neuron"):
                 raise ValueError("sizes is required when module has no n_neuron.")
             sizes = tuple(getattr(self, "n_neuron"))
 
-        sizes = tuple(sizes)
+        sizes_spec = tuple(sizes)
 
-        if isinstance(trainable_param, bool):
-            is_trainable = trainable_param
-        elif isinstance(trainable_param, set):
-            is_trainable = name in trainable_param
-        elif hasattr(self, "trainable_param"):
-            is_trainable = name in getattr(self, "trainable_param")
-        else:
-            is_trainable = False
+        is_trainable = self._resolve_is_trainable(name, trainable_param)
 
         if trainable_shape not in {"auto", "scalar", "full"}:
             raise ValueError(
@@ -92,12 +202,22 @@ class ParamBufferMixin(torch.nn.Module):
                 "Use 'auto', 'scalar', or 'full'."
             )
 
+        sizes = self._resolve_sizes_spec_for_value(val, sizes_spec)
         val = torch.as_tensor(val, **kwargs)
-        if hasattr(self, name):
-            delattr(self, name)
 
         if val.ndim == 1 and val.numel() == int(np.prod(sizes)):
             val = val.reshape(sizes)
+
+        if (
+            len(sizes) > 1
+            and val.ndim == len(sizes) - 1
+            and tuple(val.shape) == sizes[:-1]
+        ):
+            val = val[..., None]
+        elif (
+            val.ndim == 1 and len(sizes) > 1 and val.numel() == int(np.prod(sizes[:-1]))
+        ):
+            val = val.reshape(sizes[:-1] + (1,))
 
         if not is_broadcastable(val.shape, sizes):
             raise ValueError(
@@ -118,13 +238,61 @@ class ParamBufferMixin(torch.nn.Module):
                 )
             val = val.reshape(-1)[:1].reshape(())
 
-        self._param_shape_mode[name] = trainable_shape if is_trainable else "auto"
-        self._param_allow_compact[name] = allow_compact
+        if normalize_to_sizes and trainable_shape != "scalar" and val.shape != sizes:
+            val = torch.broadcast_to(val, sizes).clone()
 
-        if is_trainable:
-            self.register_parameter(name, torch.nn.Parameter(val))
+        return PreparedParam(
+            name=name,
+            value=val,
+            sizes=sizes,
+            is_trainable=is_trainable,
+            trainable_shape=trainable_shape,
+            allow_compact=allow_compact,
+        )
+
+    def def_param_register(self, prepared: PreparedParam) -> None:
+        """Register a parameter from :meth:`def_param_prepare`."""
+        if hasattr(self, prepared.name):
+            delattr(self, prepared.name)
+
+        self._param_shape_mode[prepared.name] = (
+            prepared.trainable_shape if prepared.is_trainable else "auto"
+        )
+        self._param_allow_compact[prepared.name] = prepared.allow_compact
+
+        if prepared.is_trainable:
+            self.register_parameter(prepared.name, torch.nn.Parameter(prepared.value))
         else:
-            self.register_buffer(name, val, persistent=True)
+            self.register_buffer(prepared.name, prepared.value, persistent=True)
+
+    def def_param(
+        self,
+        name: str,
+        val,
+        *,
+        sizes: tuple[int | None, ...] | None = None,
+        trainable_param: bool | set[str] | None = None,
+        trainable_shape: str = "auto",
+        normalize_to_sizes: bool = False,
+        **kwargs,
+    ):
+        """Define a trainable parameter or persistent buffer.
+
+        Convenience wrapper equivalent to:
+
+        1. :meth:`def_param_prepare`
+        2. :meth:`def_param_register`
+        """
+        prepared = self.def_param_prepare(
+            name,
+            val,
+            sizes=sizes,
+            trainable_param=trainable_param,
+            trainable_shape=trainable_shape,
+            normalize_to_sizes=normalize_to_sizes,
+            **kwargs,
+        )
+        self.def_param_register(prepared)
 
     @staticmethod
     def _is_uniform(tensor: torch.Tensor, atol: float = 1e-6) -> bool:

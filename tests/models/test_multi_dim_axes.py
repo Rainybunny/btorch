@@ -56,6 +56,42 @@ def test_glif_multi_dim_state_shapes():
     assert spike.shape == batch_shape + neuron_shape
 
 
+def test_glif_scalar_tensor_k_broadcasts_to_asc_channels():
+    # Regression test for GLIF ASC shape inference.
+    #
+    # A scalar tensor is a common way to provide a shared decay constant `k`
+    # while still using a multi-channel `asc_amps`. In this configuration,
+    # GLIF should infer `n_Iasc` from the largest trailing ASC dimension and
+    # broadcast scalar `k` across all ASC channels.
+    #
+    # This case previously raised `IndexError: tuple index out of range` during
+    # initialization when the code assumed non-sequence inputs always had a
+    # trailing axis.
+    neuron_shape = (4,)
+    neuron = GLIF3(
+        n_neuron=neuron_shape,
+        v_threshold=-50.0,
+        v_reset=-65.0,
+        c_m=0.05,
+        tau=20.0,
+        k=torch.tensor(0.2),
+        asc_amps=[1.0, 0.5],
+        tau_ref=2.0,
+        step_mode="s",
+    )
+
+    assert neuron.n_Iasc == 2
+    assert neuron.k.shape == neuron_shape + (2,)
+    assert neuron.asc_amps.shape == neuron_shape + (2,)
+
+    # The scalar `k` should broadcast to both ASC channels for every neuron.
+    expected_k = torch.full(neuron_shape + (2,), 0.2, dtype=neuron.k.dtype)
+    assert torch.allclose(neuron.k, expected_k)
+
+    init_net_state(neuron, batch_size=(3,))
+    assert neuron.Iasc.shape == (3,) + neuron_shape + (2,)
+
+
 def test_synapse_delay_buffer_multi_dim_axes():
     # Delay buffers keep time first, then batch, then neuron axes.
     batch_shape = (2, 1)
