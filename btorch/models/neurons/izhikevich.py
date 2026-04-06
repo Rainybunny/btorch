@@ -119,13 +119,55 @@ class Izhikevich(BaseNode):
             dtype=dtype,
         )
         _factory_kwargs: dict[str, Any] = {"device": device, "dtype": dtype}
-        self._def_param("c_m", c_m, **_factory_kwargs)
-        self._def_param("v_rest", v_rest, **_factory_kwargs)
-        self._def_param("v_peak", v_peak, **_factory_kwargs)
-        self._def_param("k", k, **_factory_kwargs)
-        self._def_param("a", a, **_factory_kwargs)
-        self._def_param("b", b, **_factory_kwargs)
-        self._def_param("d", d, **_factory_kwargs)
+        self.def_param(
+            "c_m",
+            c_m,
+            sizes=self.n_neuron,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
+        self.def_param(
+            "v_rest",
+            v_rest,
+            sizes=self.n_neuron,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
+        self.def_param(
+            "v_peak",
+            v_peak,
+            sizes=self.n_neuron,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
+        self.def_param(
+            "k",
+            k,
+            sizes=self.n_neuron,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
+        self.def_param(
+            "a",
+            a,
+            sizes=self.n_neuron,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
+        self.def_param(
+            "b",
+            b,
+            sizes=self.n_neuron,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
+        self.def_param(
+            "d",
+            d,
+            sizes=self.n_neuron,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
 
         self.register_memory("u", 0, self.n_neuron)
         if pre_spike:

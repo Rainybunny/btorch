@@ -121,15 +121,50 @@ class ALIF(BaseNode):
             dtype=dtype,
         )
         _factory_kwargs: dict[str, Any] = {"device": device, "dtype": dtype}
-        self._def_param("c_m", c_m, **_factory_kwargs)
-        self._def_param("g_leak", g_leak, **_factory_kwargs)
-        self._def_param("E_leak", E_leak, **_factory_kwargs)
-        self._def_param("E_k", E_k, **_factory_kwargs)
-        self._def_param("tau_adapt", tau_adapt, **_factory_kwargs)
-        self._def_param("dg_k", dg_k, **_factory_kwargs)
+        self.def_param(
+            "c_m",
+            c_m,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
+        self.def_param(
+            "g_leak",
+            g_leak,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
+        self.def_param(
+            "E_leak",
+            E_leak,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
+        self.def_param(
+            "E_k",
+            E_k,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
+        self.def_param(
+            "tau_adapt",
+            tau_adapt,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
+        self.def_param(
+            "dg_k",
+            dg_k,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
         self._use_refractory = tau_ref is not None
         if self._use_refractory:
-            self._def_param("tau_ref", tau_ref, **_factory_kwargs)
+            self.def_param(
+                "tau_ref",
+                tau_ref,
+                trainable_param=self.trainable_param,
+                **_factory_kwargs,
+            )
             self.register_memory("refractory", 0.0, self.n_neuron)
         else:
             self.tau_ref = None
@@ -329,8 +364,20 @@ class ELIF(ALIF):
             dtype=dtype,
         )
         _factory_kwargs: dict[str, Any] = {"device": device, "dtype": dtype}
-        self._def_param("delta_T", delta_T, **_factory_kwargs)
-        self._def_param("v_T", v_T, **_factory_kwargs)
+        self.def_param(
+            "delta_T",
+            delta_T,
+            sizes=self.n_neuron,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
+        self.def_param(
+            "v_T",
+            v_T,
+            sizes=self.n_neuron,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
 
     def dV(
         self,

@@ -23,6 +23,235 @@ def is_broadcastable(shape_from, shape_to):
         return False
 
 
+class ParamBufferMixin(torch.nn.Module):
+    """Standard parameter/buffer definition and load-shape behavior.
+
+    This mixin allows defining parameters/buffers that can be stored in their
+    minimal broadcastable form (to save memory) or as full arrays. Supports:
+    - easy trainable definition via one argument: `trainable_param`
+    - optional trainable shape policy (`trainable_shape="scalar"|"full"|"auto"`)
+    - stable `load_state_dict` behavior for uniform vs non-uniform tensors
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # name -> "auto" | "scalar" | "full"
+        self._param_shape_mode: dict[str, str] = {}
+        # name -> whether compact scalar save/load is allowed
+        self._param_allow_compact: dict[str, bool] = {}
+
+    def def_param(
+        self,
+        name: str,
+        val,
+        *,
+        sizes: tuple[int, ...] | None = None,
+        trainable_param: bool | set[str] | None = None,
+        trainable_shape: str = "auto",
+        **kwargs,
+    ):
+        """Define a trainable parameter or persistent buffer.
+
+        Args:
+            name: Attribute name.
+            val: Initial value.
+            sizes: Intended tensor shape. If None, uses ``self.n_neuron``.
+            trainable_param: Trainable selector:
+                - ``True``: trainable parameter
+                - ``False``: buffer
+                - ``set[str]``: trainable when ``name in set``
+                - ``None``: fallback to ``self.trainable_param`` if present
+            trainable_shape: Shape policy for trainable values:
+                - ``"auto"``: keep provided shape
+                - ``"scalar"``: require uniform value and store as scalar
+                - ``"full"``: store as full tensor with ``sizes``
+            **kwargs: Passed to :func:`torch.as_tensor`.
+
+        Raises:
+            ValueError: If the value shape is not broadcastable to ``sizes``.
+        """
+        if sizes is None:
+            if not hasattr(self, "n_neuron"):
+                raise ValueError("sizes is required when module has no n_neuron.")
+            sizes = tuple(getattr(self, "n_neuron"))
+
+        sizes = tuple(sizes)
+
+        if isinstance(trainable_param, bool):
+            is_trainable = trainable_param
+        elif isinstance(trainable_param, set):
+            is_trainable = name in trainable_param
+        elif hasattr(self, "trainable_param"):
+            is_trainable = name in getattr(self, "trainable_param")
+        else:
+            is_trainable = False
+
+        if trainable_shape not in {"auto", "scalar", "full"}:
+            raise ValueError(
+                f"Invalid trainable_shape={trainable_shape!r}. "
+                "Use 'auto', 'scalar', or 'full'."
+            )
+
+        val = torch.as_tensor(val, **kwargs)
+        if hasattr(self, name):
+            delattr(self, name)
+
+        if val.ndim == 1 and val.numel() == int(np.prod(sizes)):
+            val = val.reshape(sizes)
+
+        if not is_broadcastable(val.shape, sizes):
+            raise ValueError(
+                f"{name} shape {tuple(val.shape)} is not broadcastable to {sizes}."
+            )
+
+        # Keep compacting only for neuron-sized parameters. For explicitly
+        # larger shapes (e.g., neuron + extra axes), preserve full shape.
+        allow_compact = sizes == tuple(getattr(self, "n_neuron", sizes))
+
+        if is_trainable and trainable_shape == "full" and val.shape != sizes:
+            val = expand_leading_dims(val, sizes, match_full_shape=True)
+        if is_trainable and trainable_shape == "scalar":
+            if not self._is_uniform(val):
+                raise ValueError(
+                    f"{name} with trainable_shape='scalar' must be uniform, "
+                    f"but got shape {tuple(val.shape)} with non-uniform values."
+                )
+            val = val.reshape(-1)[:1].reshape(())
+
+        self._param_shape_mode[name] = trainable_shape if is_trainable else "auto"
+        self._param_allow_compact[name] = allow_compact
+
+        if is_trainable:
+            self.register_parameter(name, torch.nn.Parameter(val))
+        else:
+            self.register_buffer(name, val, persistent=True)
+
+    @staticmethod
+    def _is_uniform(tensor: torch.Tensor, atol: float = 1e-6) -> bool:
+        if tensor.numel() <= 1:
+            return True
+        if tensor.dtype.is_floating_point:
+            return bool(torch.allclose(tensor, tensor.reshape(-1)[0], atol=atol))
+        return bool((tensor == tensor.reshape(-1)[0]).all())
+
+    def _replace_registered_tensor(self, name: str, value: torch.Tensor) -> None:
+        current = getattr(self, name)
+        value = value.to(device=current.device, dtype=current.dtype)
+        if name in self._parameters:
+            requires_grad = bool(self._parameters[name].requires_grad)
+            delattr(self, name)
+            self.register_parameter(
+                name,
+                torch.nn.Parameter(value, requires_grad=requires_grad),
+            )
+            return
+        if name in self._buffers:
+            persistent = name not in self._non_persistent_buffers_set
+            delattr(self, name)
+            self.register_buffer(name, value, persistent=persistent)
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        for name, mode in self._param_shape_mode.items():
+            if mode == "full":
+                continue
+            if not self._param_allow_compact.get(name, True):
+                continue
+            key = prefix + name
+            if key not in destination:
+                continue
+            value = destination[key]
+            if torch.is_tensor(value) and value.numel() > 1 and self._is_uniform(value):
+                destination[key] = value.reshape(-1)[:1].reshape(())
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        for name, mode in self._param_shape_mode.items():
+            key = prefix + name
+            if key not in state_dict or not hasattr(self, name):
+                continue
+
+            loaded = state_dict[key]
+            if not torch.is_tensor(loaded):
+                continue
+
+            current = getattr(self, name)
+            current_shape = tuple(current.shape)
+            loaded_shape = tuple(loaded.shape)
+
+            # Parameters with trailing dimensions should preserve their full
+            # shape. We only broadcast incoming compact tensors to the current
+            # shape but never collapse to scalar.
+            if not self._param_allow_compact.get(name, True):
+                if loaded_shape != current_shape and is_broadcastable(
+                    loaded_shape, current_shape
+                ):
+                    state_dict[key] = torch.broadcast_to(loaded, current_shape).clone()
+                elif loaded_shape != current_shape:
+                    self._replace_registered_tensor(name, loaded.detach().clone())
+                continue
+
+            # Mode full: always keep full tensor shape.
+            if mode == "full":
+                if loaded_shape != current_shape and is_broadcastable(
+                    loaded_shape, current_shape
+                ):
+                    state_dict[key] = torch.broadcast_to(loaded, current_shape).clone()
+                elif loaded_shape != current_shape:
+                    self._replace_registered_tensor(name, loaded.detach().clone())
+                continue
+
+            if mode == "scalar":
+                if loaded.numel() == 1:
+                    scalar = loaded.reshape(-1)[:1].reshape(())
+                    state_dict[key] = scalar
+                    if current_shape != ():
+                        self._replace_registered_tensor(name, scalar)
+                    continue
+
+                # Non-scalar checkpoint for scalar mode:
+                # - trainable parameter: bail out (avoid silent layout changes)
+                # - non-trainable buffer: promote to loaded shape
+                if name in self._parameters:
+                    error_msgs.append(
+                        f"{key}: received non-scalar checkpoint tensor for "
+                        "trainable_shape='scalar' trainable parameter."
+                    )
+                    continue
+
+                self._replace_registered_tensor(name, loaded.detach().clone())
+                continue
+
+            # Mode auto:
+            # - uniform loaded value -> scalar
+            # - non-uniform loaded value -> full tensor
+            if self._is_uniform(loaded):
+                scalar = loaded.reshape(-1)[:1].reshape(())
+                state_dict[key] = scalar
+                if current_shape != ():
+                    self._replace_registered_tensor(name, scalar)
+            elif loaded_shape != current_shape:
+                self._replace_registered_tensor(name, loaded.detach().clone())
+
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+
+
 def normalize_n_neuron(
     n_neuron: int | Sequence[int],
 ) -> tuple[tuple[int, ...], int]:
@@ -444,9 +673,7 @@ class MemoryModule(base.MemoryModule):
 
 # TODO: pre_spike_v should be merged with v to avoid double memory consumption
 # TODO: ODE integration method should be configurable
-
-
-class BaseNode(MemoryModule):
+class BaseNode(ParamBufferMixin, MemoryModule):
     """Base class for differentiable spiking neurons.
 
     Implements the spiking neuron lifecycle: charge -> adapt -> fire -> reset.
@@ -511,8 +738,20 @@ class BaseNode(MemoryModule):
             )
 
         self.trainable_param = set(trainable_param)
-        self._def_param("v_threshold", v_threshold, **_factory_kwargs)
-        self._def_param("v_reset", v_reset, **_factory_kwargs)
+        self.def_param(
+            "v_threshold",
+            v_threshold,
+            sizes=self.n_neuron,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
+        self.def_param(
+            "v_reset",
+            v_reset,
+            sizes=self.n_neuron,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
 
         self.detach_reset = detach_reset
         self.surrogate_function = surrogate_function
@@ -540,31 +779,6 @@ class BaseNode(MemoryModule):
         if mem_repr:
             parts.append(mem_repr)
         return ", ".join(parts)
-
-    # TODO: improve
-    def _def_param(self, name, val, *, allow_trailing_dims: bool = False, **kwargs):
-        val = torch.as_tensor(val, **kwargs)
-        if hasattr(self, name):
-            delattr(self, name)
-        neuron_shape = self.n_neuron
-        if val.ndim == 0:
-            val = expand_leading_dims(val, neuron_shape, match_full_shape=True)
-        elif val.shape[: len(neuron_shape)] != neuron_shape:
-            if val.ndim == 1 and val.numel() == self.size:
-                val = val.reshape(neuron_shape)
-            elif allow_trailing_dims:
-                val = expand_leading_dims(val, neuron_shape)
-            elif is_broadcastable(val.shape, neuron_shape):
-                val = expand_leading_dims(val, neuron_shape, match_full_shape=True)
-            else:
-                raise ValueError(
-                    f"{name} shape {tuple(val.shape)} is not broadcastable to "
-                    f"{neuron_shape}."
-                )
-        if name in self.trainable_param:
-            self.register_parameter(name, torch.nn.Parameter(val))
-        else:
-            self.register_buffer(name, val, persistent=True)
 
     @abstractmethod
     def neuronal_charge(self, x: torch.Tensor):

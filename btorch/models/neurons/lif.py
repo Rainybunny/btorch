@@ -114,11 +114,29 @@ class LIF(BaseNode):
             dtype=dtype,
         )
         _factory_kwargs: dict[str, Any] = {"device": device, "dtype": dtype}
-        self._def_param("c_m", c_m, **_factory_kwargs)
-        self._def_param("tau", tau, **_factory_kwargs)
+        self.def_param(
+            "c_m",
+            c_m,
+            sizes=self.n_neuron,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
+        self.def_param(
+            "tau",
+            tau,
+            sizes=self.n_neuron,
+            trainable_param=self.trainable_param,
+            **_factory_kwargs,
+        )
         self._use_refractory = tau_ref is not None
         if self._use_refractory:
-            self._def_param("tau_ref", tau_ref, **_factory_kwargs)
+            self.def_param(
+                "tau_ref",
+                tau_ref,
+                sizes=self.n_neuron,
+                trainable_param=self.trainable_param,
+                **_factory_kwargs,
+            )
             self.register_memory("refractory", 0.0, self.n_neuron)
         else:
             self.tau_ref = None
