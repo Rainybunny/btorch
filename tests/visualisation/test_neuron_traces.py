@@ -531,3 +531,94 @@ def test_plot_neuron_traces_axis_units_voltage_and_currents():
     assert fig.axes[2].get_ylabel() == "PSC (pA)"
 
     plt.close(fig)
+
+
+def test_plot_neuron_traces_long_labels_adaptive_width():
+    """Test 3-column layout with long metadata labels and adaptive width.
+
+    This verifies that long neuron labels (containing root_id,
+    cell_type, neurotransmitter, etc.) don't squeeze the subplot columns
+    too narrow, and that the figure width scales appropriately.
+    """
+    n_time, n_neurons = 500, 6
+    dt = 0.1
+    voltage = -65 + 15 * np.random.randn(n_time, n_neurons)
+    asc = -10 * np.random.exponential(1, (n_time, n_neurons))
+    psc = 50 * np.random.randn(n_time, n_neurons)
+    spikes = np.zeros((n_time, n_neurons))
+
+    # Simulate some spikes for realism
+    for i in range(n_neurons):
+        spike_times = np.random.choice(n_time, size=5, replace=False)
+        spikes[spike_times, i] = 1
+
+    # Create neuron metadata with long descriptive labels
+    neurons_df = pd.DataFrame(
+        {
+            "simple_id": range(n_neurons),
+            "root_id": [720575940629199810 + i * 1000 for i in range(n_neurons)],
+            "cell_type": ["ORN_VA1v", "Sm02", "R1-6", "R1-6", "BM_lNm", "Tm5f"],
+            "nt": ["ACH", "ACH", "ACH", "ACH", "ACH", "ACH"],
+            "v_rest": [-60.0 + i * 0.5 for i in range(n_neurons)],
+        }
+    )
+
+    def make_long_label(idx: int) -> str:
+        row = neurons_df.iloc[idx]
+        # Long label mimicking connectome metadata format
+        return (
+            f"rid={row['root_id']}|"
+            f"ct={row['cell_type']}|"
+            f"nt={row['nt']}|"
+            f"v={row['v_rest']:.1f}|"
+            f"fr={np.random.uniform(10, 400):.1f}|"
+            f"cv={np.random.uniform(0, 2):.2f}|"
+            f"fa={np.random.uniform(0, 0.05):.2f}|"
+            f"ecl={np.random.uniform(7000, 8000):.2f}|"
+            f"cr={np.random.uniform(0, 1):.2f}|"
+            f"lg={np.random.uniform(-10, -5):.1f}|"
+            f"r_pa={np.random.uniform(2, 4):.2f}|"
+            f"r_ei=nan"
+        )
+
+    states = SimulationStates(
+        voltage=voltage,
+        asc=asc,
+        psc=psc,
+        spikes=spikes,
+        dt=dt,
+    )
+
+    format = TracePlotFormat(
+        neuron_indices=[0, 1, 2, 3, 4, 5],
+        show_voltage=True,
+        show_asc=True,
+        show_psc=True,
+        neuron_labels=make_long_label,
+        neuron_label_position="top",
+        neurons_per_row=2,  # 3 neurons per row to fit more columns
+        auto_width=True,
+    )
+
+    fig = plot_neuron_traces(states=states, format=format)
+
+    # Verify combined figure (not separate_figures mode)
+    assert not isinstance(fig, dict), "Expected combined Figure, not dict"
+
+    # Verify figure has reasonable dimensions (not too narrow)
+    # With 3 columns x 2 neurons_per_row = 6 subplots wide
+    # Should be at least 20 inches wide to accommodate long labels
+    assert fig.get_figwidth() >= 20.0, (
+        f"Figure width {fig.get_figwidth()} too narrow for 3-column layout "
+        f"with long labels"
+    )
+
+    # Verify we have the expected number of axes (label rows + plot rows)
+    # With 6 neurons and 2 per row = 3 rows * (1 label + 3 traces) = 12 axes
+    expected_axes = 3 * 2 * 2  # 3 rows, 2 neurons per row, 2 row types each
+    assert (
+        len(fig.axes) >= expected_axes
+    ), f"Expected at least {expected_axes} axes, got {len(fig.axes)}"
+
+    save_fig(fig, name="neuron_traces_long_labels_adaptive_width")
+    plt.close(fig)
