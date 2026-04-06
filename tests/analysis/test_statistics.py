@@ -12,7 +12,6 @@ import torch
 from btorch.analysis.statistics import (
     compute_log_hist,
     describe_array,
-    get_corr_stats,
     use_percentiles,
     use_stats,
 )
@@ -79,57 +78,6 @@ def test_compute_log_hist_connection_weights():
 
 
 # =============================================================================
-# Example 3: Correlation analysis for spike trains (get_corr_stats)
-# =============================================================================
-def test_get_corr_stats_stimulus_noise_correlations():
-    """Compute stimulus and noise correlations from repeated stimulus
-    presentations.
-
-    This demonstrates the standard analysis for separating stimulus-driven
-    correlations from trial-to-trial variability (noise correlations) in
-    neural population recordings.
-
-    Setup: Multiple repetitions (nrep) of the same stimulus, recording from
-    multiple cells (ncell) over time frames (nframe).
-    """
-    rng = np.random.default_rng(42)
-    nrep = 10  # 10 repetitions
-    ncell = 5  # 5 neurons
-    nframe = 100  # 100 time frames
-    max_dur = 3  # Correlation window of +/- 3 frames
-
-    # Generate synthetic spike data with:
-    # - Shared stimulus component (correlated across neurons)
-    # - Independent noise component
-    stimulus_component = rng.poisson(2.0, size=(nrep, 1, nframe))
-    individual_component = rng.poisson(1.0, size=(nrep, ncell, nframe))
-    spikes = stimulus_component + individual_component
-
-    # Flatten for the function (expects (nrep*ncell, nframe))
-    spikes_flat = spikes.reshape(nrep * ncell, nframe)
-
-    # Compute correlations
-    C_stim, C_tot, C_noise, stim_corr, total_corr, noise_corr = get_corr_stats(
-        spikes_flat, max_dur=max_dur, nrep=nrep, ncell=ncell, nframe=nframe
-    )
-
-    # Verify output shapes
-    assert C_stim.shape == (ncell, ncell, max_dur * 2 + 1)
-    assert C_tot.shape == (ncell, ncell, max_dur * 2 + 1)
-    assert C_noise.shape == (ncell, ncell, max_dur * 2 + 1)
-
-    # Stimulus correlations should exist (due to shared stimulus component)
-    assert len(stim_corr) == ncell * (ncell - 1) // 2
-    assert len(noise_corr) == len(stim_corr)
-
-    # Total correlation should approximately equal stimulus + noise correlations
-    # (within numerical precision)
-    for i in range(len(stim_corr)):
-        expected_total = stim_corr[i] + noise_corr[i]
-        assert np.isclose(total_corr[i], expected_total, rtol=1e-10)
-
-
-# =============================================================================
 # Example 4: Using @use_stat decorator for flexible metric aggregation
 # =============================================================================
 def test_use_stat_decorator_numpy_and_torch():
@@ -182,15 +130,15 @@ def test_use_stat_decorator_numpy_and_torch():
     mean_rate, info = compute_firing_rates(spike_data, stat="mean")
     assert isinstance(mean_rate, float)
     assert np.isclose(mean_rate, rates.mean())
-    assert info["values0_mean"] == mean_rate
+    assert info["values_mean"] == mean_rate
 
     # Use case 3: Get per-neuron rates but also compute population statistics
     rates, info = compute_firing_rates(spike_data, stat_info=["mean", "std", "max"])
     assert rates.shape == (n_neurons,)
-    assert "values0_mean" in info
-    assert "values0_std" in info
-    assert "values0_max" in info
-    assert np.isclose(info["values0_mean"], rates.mean())
+    assert "values_mean" in info
+    assert "values_std" in info
+    assert "values_max" in info
+    assert np.isclose(info["values_mean"], rates.mean())
 
     # Use case 4: Test with torch tensors (should work seamlessly)
     spike_data_torch = torch.from_numpy(spike_data).float()
@@ -291,18 +239,18 @@ def test_use_percentiles_decorator():
     assert "values_levels" not in info  # Not computed
 
     # Use case 2: Get modulation indices and compute median (50th percentile)
-    mod_idx, info = compute_response_modulation_index(responses, percentiles=0.5)
+    mod_idx, info = compute_response_modulation_index(responses, percentiles=50)
     assert "values_percentiles" in info
     assert "values_levels" in info
-    assert info["values_levels"] == (0.5,)
+    assert info["values_levels"] == (50.0,)
     median_value = info["values_percentiles"][0]
     assert np.isclose(median_value, np.median(mod_idx))
 
     # Use case 3: Compute multiple percentiles (quartiles)
     mod_idx, info = compute_response_modulation_index(
-        responses, percentiles=(0.25, 0.5, 0.75)
+        responses, percentiles=(25, 50, 75)
     )
-    assert info["values_levels"] == (0.25, 0.5, 0.75)
+    assert info["values_levels"] == (25.0, 50.0, 75.0)
     p25, p50, p75 = info["values_percentiles"]
     assert p25 < p50 < p75
     assert np.isclose(p25, np.percentile(mod_idx, 25))
@@ -353,13 +301,13 @@ def test_combined_decorators():
 
     # Get per-neuron selectivity with population percentiles
     selectivity, info = analyze_tuning_selectivity(
-        tuning, stat_info="mean", percentiles=(0.1, 0.9)
+        tuning, stat_info="mean", percentiles=(10, 90)
     )
     assert selectivity.shape == (n_neurons,)
-    assert "values0_mean" in info  # From use_stat
+    assert "values_mean" in info  # From use_stat
     assert "values_percentiles" in info  # From use_percentiles (inner decorator)
     assert "values_levels" in info  # From use_percentiles (inner decorator)
-    assert info["values_levels"] == (0.1, 0.9)
+    assert info["values_levels"] == (10.0, 90.0)
 
     # Get aggregated mean with percentiles computed on the aggregated value
     # (though percentiles make most sense on per-neuron values)
@@ -450,10 +398,10 @@ def test_use_percentiles_dict_format_multiple_returns():
     data = rng.random((50, 10))
 
     # Compute percentiles using tuple format (applies to position 0 by default)
-    eci, lag, info = compute_eci_and_lag(data, percentiles=(0.25, 0.75))
+    eci, lag, info = compute_eci_and_lag(data, percentiles=(25, 75))
     assert eci.shape == (50,)
     assert lag.shape == (50,)
     # Percentiles stored with separate keys for values and levels
     assert "values_percentiles" in info
     assert "values_levels" in info
-    assert info["values_levels"] == (0.25, 0.75)
+    assert info["values_levels"] == (25.0, 75.0)
