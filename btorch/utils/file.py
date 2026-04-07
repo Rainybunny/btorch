@@ -4,7 +4,7 @@ Helpers for resolving figure output paths based on caller location
 within the repository structure.
 """
 
-import inspect
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,17 +42,28 @@ def _is_relative_to(path: Path, base: Path) -> bool:
         return False
 
 
-def caller_file(skip: int = 2) -> Path:
-    """Get the file path of the caller's module.
+def caller_file(stack_level: int = 2) -> str:
+    # 0 == this frame, 1 == caller, 2 == caller of caller
+    try:
+        from IPython.core.getipython import get_ipython
 
-    Args:
-        skip: Stack frames to skip (2 = immediate caller).
+        shell = get_ipython()
+        if shell is not None and hasattr(shell, "kernel"):
+            # Running in a notebook - try to get the notebook path
+            ns = shell.user_ns
+            # VS Code sets this
+            if "__vsc_ipynb_file__" in ns:
+                return ns["__vsc_ipynb_file__"]
+            # Some Jupyter setups set __file__
+            if "__file__" in ns:
+                return ns["__file__"]
+            # Last resort: use cwd as a fake path for relative resolution
+            import os
 
-    Returns:
-        Absolute Path of the calling file.
-    """
-    frame = inspect.stack()[skip]
-    return Path(frame.filename).resolve()
+            return str(Path(os.getcwd()) / "__notebook__.ipynb")
+    except Exception:
+        pass
+    return sys._getframe(stack_level).f_code.co_filename
 
 
 def _resolve_cfg(cfg: FigPathConfig | dict | conf.DictConfig | None):
