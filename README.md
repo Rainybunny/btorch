@@ -1,5 +1,17 @@
 # Btorch
 
+Brain-inspired differentiable PyTorch toolkit for neuromorphic and computational
+neuroscience research.
+
+Use `btorch` if you need:
+
+- stateful neuron/synapse modules with explicit memory handling
+- practical support for sparse/connectome-style network structure
+- research-friendly training features (`torch.compile`, checkpointing,
+  truncated BPTT)
+- solid runtime performance and ONNX export support
+- connectome import/export via SONATA, and flexible network definition coming soon  
+
 Heavily influenced by [brainstate](https://github.com/chaobrain/brainstate).
 Evolved from [spikingjelly](https://github.com/fangwei123456/spikingjelly).
 We thank the developers of both libraries for the inspirations.
@@ -14,6 +26,42 @@ We thank the developers of both libraries for the inspirations.
 - More neuron and synapse models
 - Memory state with static size and managed by torch buffer
   - onnx export is easy (note: sparse matrix is not supported by onnx)
+
+## For AI Agents / Coding Assistants
+
+**Copy and paste this prompt into your coding assistant:**
+
+```text
+Install `btorch` for this repository.
+
+Before running commands, ask the user two things:
+1. Does the user want `conda`/`micromamba` setup or `pip`-first setup?
+2. Which environment name should be used? (default: `ml-py312`)
+
+Then follow the matching path.
+
+Path A - Conda or Micromamba (recommended):
+- Create env from `dev-requirements.yaml` using the user-provided env name.
+- Activate the environment.
+- Run: `pip install -e . --config-settings editable_mode=strict`
+
+Path B - Pip-first:
+- Create and activate a virtual environment.
+- If `torch_scatter`/`torch_sparse` fail from PyPI, install wheels that match
+  both the installed PyTorch version and CUDA version from:
+  `https://data.pyg.org/whl/` (for example,
+  `https://data.pyg.org/whl/torch-<torch_version>+cu<cuda_version>.html`).
+- Run: `pip install -e . --config-settings editable_mode=strict`
+
+After install, verify with:
+- `python -c "import btorch; print(btorch.__version__)"`
+
+Report:
+- chosen setup path
+- environment name
+- install/verification output
+- any follow-up actions needed
+```
 
 ## Installation
 
