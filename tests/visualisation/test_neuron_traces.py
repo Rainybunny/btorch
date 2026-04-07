@@ -533,7 +533,7 @@ def test_plot_neuron_traces_axis_units_voltage_and_currents():
     plt.close(fig)
 
 
-def test_plot_neuron_traces_long_labels_adaptive_width():
+def test_plot_neuron_traces_3column_long_labels():
     """Test 3-column layout with long metadata labels and adaptive width.
 
     This verifies that long neuron labels (containing root_id,
@@ -577,7 +577,6 @@ def test_plot_neuron_traces_long_labels_adaptive_width():
             f"ecl={np.random.uniform(7000, 8000):.2f}|"
             f"cr={np.random.uniform(0, 1):.2f}|"
             f"lg={np.random.uniform(-10, -5):.1f}|"
-            f"r_pa={np.random.uniform(2, 4):.2f}|"
             f"r_ei=nan"
         )
 
@@ -622,3 +621,162 @@ def test_plot_neuron_traces_long_labels_adaptive_width():
 
     save_fig(fig, name="neuron_traces_long_labels_adaptive_width")
     plt.close(fig)
+
+
+def test_plot_neuron_traces_with_input():
+    """Test plotting with input current - real world use case.
+
+    Simulates plotting neuron traces with external input current alongside
+    EPSC, IPSC and total PSC.
+    """
+    n_time, n_neurons = 1000, 20
+    dt = 0.1
+    voltage = -65 + 15 * np.random.randn(n_time, n_neurons)
+    psc = 50 * np.random.randn(n_time, n_neurons)
+    epsc = np.abs(psc) * (psc > 0)
+    ipsc = -np.abs(psc) * (psc < 0)
+    input_current = 100 * np.random.randn(n_time, n_neurons)
+
+    # Test with plain args
+    fig = plot_neuron_traces(
+        voltage=voltage,
+        psc=psc,
+        epsc=epsc,
+        ipsc=ipsc,
+        input=input_current,
+        dt=dt,
+        neuron_indices=[0, 5, 10],
+    )
+    save_fig(fig, name="neuron_traces_with_input")
+    plt.close(fig)
+
+    # Test with dataclass interface
+    states = SimulationStates(
+        voltage=voltage,
+        psc=psc,
+        epsc=epsc,
+        ipsc=ipsc,
+        input=input_current,
+        dt=dt,
+    )
+    fig = plot_neuron_traces(states=states, neuron_indices=[0, 1])
+    save_fig(fig, name="neuron_traces_with_input_dataclass")
+    plt.close(fig)
+
+
+def test_plot_neuron_traces_psc_multi_dim():
+    """Test PSC with multiple components like ASC - real world use case.
+
+    When psc has shape (time, neurons, n_psc), each component is plotted
+    separately with labels. This is analogous to how ASC handles multiple
+    components.
+    """
+    n_time, n_neurons = 1000, 20
+    dt = 0.1
+    voltage = -65 + 15 * np.random.randn(n_time, n_neurons)
+    # PSC with multiple components (e.g., different synapse types)
+    psc = np.stack(
+        [
+            50 * np.random.randn(n_time, n_neurons),
+            30 * np.random.randn(n_time, n_neurons),
+            20 * np.random.randn(n_time, n_neurons),
+            10 * np.random.randn(n_time, n_neurons),
+        ],
+        axis=2,
+    )  # Shape: (time, neurons, 4)
+
+    # Test with custom labels
+    custom_labels = ["Excitatory", "Inhibitory", "Modulatory", "Background"]
+    fig = plot_neuron_traces(
+        voltage=voltage,
+        psc=psc,
+        psc_labels=custom_labels,
+        dt=dt,
+        neuron_indices=[0, 5, 10],
+    )
+    save_fig(fig, name="neuron_traces_psc_multi_dim")
+    plt.close(fig)
+
+    # Test with default labels (no psc_labels provided)
+    fig = plot_neuron_traces(
+        voltage=voltage,
+        psc=psc[:, :, :3],  # Use 3 components for brevity
+        dt=dt,
+        neuron_indices=[0, 1],
+    )
+    save_fig(fig, name="neuron_traces_psc_multi_dim_default_labels")
+    plt.close(fig)
+
+
+def test_plot_neuron_traces_psc_multi_dim_validation_errors():
+    """Test validation errors for incompatible args with multi-dim PSC.
+
+    When psc has additional dimensions (n_psc > 1), epsc/ipsc/input must
+    be None since those are already captured in the multi-dim psc.
+    """
+    n_time, n_neurons = 500, 10
+    voltage = -65 + 10 * np.random.randn(n_time, n_neurons)
+    psc = np.stack(
+        [
+            50 * np.random.randn(n_time, n_neurons),
+            30 * np.random.randn(n_time, n_neurons),
+            20 * np.random.randn(n_time, n_neurons),
+        ],
+        axis=2,
+    )  # Shape: (time, neurons, 3)
+
+    # epsc should raise error
+    with pytest.raises(ValueError, match="epsc must be None"):
+        plot_neuron_traces(
+            voltage=voltage,
+            psc=psc,
+            epsc=30 * np.random.randn(n_time, n_neurons),
+            dt=0.1,
+            neuron_indices=[0, 1],
+        )
+
+    # ipsc should raise error
+    with pytest.raises(ValueError, match="ipsc must be None"):
+        plot_neuron_traces(
+            voltage=voltage,
+            psc=psc,
+            ipsc=-20 * np.random.randn(n_time, n_neurons),
+            dt=0.1,
+            neuron_indices=[0, 1],
+        )
+
+    # input should raise error
+    with pytest.raises(ValueError, match="input must be None"):
+        plot_neuron_traces(
+            voltage=voltage,
+            psc=psc,
+            input=100 * np.random.randn(n_time, n_neurons),
+            dt=0.1,
+            neuron_indices=[0, 1],
+        )
+
+
+def test_plot_neuron_traces_input_separate_figures():
+    """Test input plotting in separate figures mode."""
+    n_time, n_neurons = 500, 10
+    voltage = -65 + 10 * np.random.randn(n_time, n_neurons)
+    psc = 50 * np.random.randn(n_time, n_neurons)
+    input_current = 100 * np.random.randn(n_time, n_neurons)
+
+    figs = plot_neuron_traces(
+        voltage=voltage,
+        psc=psc,
+        input=input_current,
+        dt=0.1,
+        neuron_indices=[0, 1],
+        separate_figures=True,
+        show_asc=False,
+    )
+
+    assert isinstance(figs, dict)
+    assert "voltage" in figs
+    assert "psc" in figs
+
+    for name, fig in figs.items():
+        save_fig(fig, name=f"neuron_traces_separate_input_{name}")
+        plt.close(fig)

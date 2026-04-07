@@ -1418,9 +1418,11 @@ class SimulationStates:
         dt: Simulation timestep in ms
         asc: Afterspike current traces (time, neurons), (time, batch, neurons),
             or (time, batch, neurons, n_asc) for multiple ASC components
-        psc: Total postsynaptic current (time, neurons) or (time, batch, neurons)
+        psc: Total postsynaptic current (time, neurons), (time, batch, neurons),
+            or (time, batch, neurons, n_psc) for multiple PSC components
         epsc: Excitatory PSC (time, neurons) or (time, batch, neurons)
         ipsc: Inhibitory PSC (time, neurons) or (time, batch, neurons)
+        input: Input current (time, neurons) or (time, batch, neurons)
         spikes: Spike trains (time, neurons) or (time, batch, neurons)
         v_threshold: Spike threshold voltage(s), scalar or per-neuron
         v_reset: Reset voltage(s), scalar or per-neuron
@@ -1432,6 +1434,7 @@ class SimulationStates:
     psc: np.ndarray | torch.Tensor | None = None
     epsc: np.ndarray | torch.Tensor | None = None
     ipsc: np.ndarray | torch.Tensor | None = None
+    input: np.ndarray | torch.Tensor | None = None
     spikes: np.ndarray | torch.Tensor | None = None
     v_threshold: float | Sequence[float] | np.ndarray | torch.Tensor | None = None
     v_reset: float | Sequence[float] | np.ndarray | torch.Tensor | None = None
@@ -1537,6 +1540,8 @@ def plot_neuron_traces(
     psc: np.ndarray | torch.Tensor | None = None,
     epsc: np.ndarray | torch.Tensor | None = None,
     ipsc: np.ndarray | torch.Tensor | None = None,
+    input: np.ndarray | torch.Tensor | None = None,
+    psc_labels: Sequence[str] | None = None,
     spikes: np.ndarray | torch.Tensor | None = None,
     v_threshold: float | Sequence[float] | np.ndarray | torch.Tensor | None = None,
     v_reset: float | Sequence[float] | np.ndarray | torch.Tensor | None = None,
@@ -1567,9 +1572,16 @@ def plot_neuron_traces(
         dt: Timestep in ms
         asc: Afterspike current traces (time, neurons), (time, batch, neurons),
             or (time, batch, neurons, n_asc) for multiple ASC components
-        psc: Postsynaptic current traces (time, neurons) or (time, batch, neurons)
+        psc: Postsynaptic current traces (time, neurons), (time, batch, neurons),
+            or (time, batch, neurons, n_psc) for multiple PSC components.
+            If psc has additional dims (n_psc > 1), epsc, ipsc, and input
+            should be None.
         epsc: Excitatory PSC traces (time, neurons) or (time, batch, neurons)
         ipsc: Inhibitory PSC traces (time, neurons) or (time, batch, neurons)
+        input: Input current traces (time, neurons) or (time, batch, neurons)
+        psc_labels: Labels for PSC components when psc has shape
+            (time, neurons, n_psc) or (time, batch, neurons, n_psc).
+            If None, defaults to ["PSC_0", "PSC_1", ...].
         spikes: Spike trains (time, neurons) or (time, batch, neurons)
         v_threshold: Spike threshold(s), scalar or per-neuron values
         v_reset: Reset voltage reference line(s), scalar or per-neuron values
@@ -1602,6 +1614,7 @@ def plot_neuron_traces(
         psc = states.psc if psc is None else psc
         epsc = states.epsc if epsc is None else epsc
         ipsc = states.ipsc if ipsc is None else ipsc
+        input = states.input if input is None else input
         spikes = states.spikes if spikes is None else spikes
         v_threshold = states.v_threshold if v_threshold is None else v_threshold
         v_reset = states.v_reset if v_reset is None else v_reset
@@ -1633,17 +1646,67 @@ def plot_neuron_traces(
     if batch_idx is None:
         batch_idx = 0
 
+    # Check if PSC has additional dimensions (n_psc > 1) BEFORE batch extraction
+    # This must be done first because 3D PSC (time, neurons, n_psc) would be
+    # incorrectly treated as (time, batch, neurons) by _extract_batch_dim
+    _psc_temp = _to_numpy(psc) if psc is not None else None
+    psc_has_extra_dim = False
+    n_psc_components = 1
+    if _psc_temp is not None and _psc_temp.ndim == 3:
+        # Check if shape matches (time, neurons, n_psc) vs (time, batch, neurons)
+        # We need voltage shape to determine n_neurons
+        _voltage_temp = _to_numpy(voltage)
+        n_neurons_from_v = _voltage_temp.shape[1]
+        if _psc_temp.shape[1] == n_neurons_from_v:
+            # Shape is (time, neurons, n_psc) - has extra dimension
+            psc_has_extra_dim = True
+            n_psc_components = _psc_temp.shape[2]
+            # Validate that epsc, ipsc, input are None when PSC has extra dims
+            if epsc is not None:
+                raise ValueError(
+                    "epsc must be None when psc has additional dimension (n_psc > 1)"
+                )
+            if ipsc is not None:
+                raise ValueError(
+                    "ipsc must be None when psc has additional dimension (n_psc > 1)"
+                )
+            if input is not None:
+                raise ValueError(
+                    "input must be None when psc has additional dimension (n_psc > 1)"
+                )
+            # Default labels if not provided
+            if psc_labels is None:
+                psc_labels = [f"PSC_{i}" for i in range(n_psc_components)]
+    # Clean up temp variables
+
     # Extract batch dimension from all data arrays
     voltage = _extract_batch_dim(voltage, batch_idx)
     spikes = _extract_batch_dim(spikes, batch_idx)
     asc = _extract_batch_dim(asc, batch_idx)
-    psc = _extract_batch_dim(psc, batch_idx)
+    # PSC with extra dims is handled separately (no batch dim expected)
+    if not psc_has_extra_dim:
+        psc = _extract_batch_dim(psc, batch_idx)
+    else:
+        # For multi-dim PSC, we still need to validate batch_idx
+        psc_arr_check = _to_numpy(psc)
+        if psc_arr_check.ndim == 4:  # (time, batch, neurons, n_psc)
+            if batch_idx >= psc_arr_check.shape[1]:
+                raise ValueError(
+                    f"batch_idx {batch_idx} out of bounds for batch dim "
+                    f"{psc_arr_check.shape[1]}"
+                )
+            psc = psc_arr_check[:, batch_idx, :, :]
+        elif psc_arr_check.ndim == 3:  # (time, neurons, n_psc)
+            # No batch dim, use as-is
+            psc = psc_arr_check
     epsc = _extract_batch_dim(epsc, batch_idx)
     ipsc = _extract_batch_dim(ipsc, batch_idx)
+    input = _extract_batch_dim(input, batch_idx)
 
     # Convert to numpy (preserve None for optional arrays)
     voltage = _to_numpy(voltage)
     spikes = _to_numpy(spikes) if spikes is not None else None
+    psc_arr = _to_numpy(psc) if psc is not None else None
     n_time, n_neurons = voltage.shape
     times = np.arange(n_time) * dt
     duration_ms = n_time * dt
@@ -1690,6 +1753,7 @@ def plot_neuron_traces(
         "psc": "#F18F01",
         "epsc": "#06A77D",
         "ipsc": "#D62246",
+        "input": "#9467bd",  # purple
         "spike": "#000000",
     }
     colors = format.colors if format and format.colors else default_colors
@@ -1773,20 +1837,43 @@ def plot_neuron_traces(
                         ax.set_title("Afterspike Current")
 
                 elif t_type == "psc":
-                    psc_arr = _to_numpy(psc)
-                    epsc_arr = (
-                        _to_numpy(epsc[:, neuron_idx]) if epsc is not None else None
-                    )
-                    ipsc_arr = (
-                        _to_numpy(ipsc[:, neuron_idx]) if ipsc is not None else None
-                    )
-                    _plot_psc_on_ax(
-                        ax, times, psc_arr[:, neuron_idx], epsc_arr, ipsc_arr, colors
-                    )
-                    if i == 0:
-                        ax.set_title("Postsynaptic Current")
-                        if epsc is not None or ipsc is not None:
+                    if psc_has_extra_dim:
+                        # PSC has additional dimension: plot each component
+                        psc_traces = psc_arr[:, neuron_idx, :]  # Shape: (time, n_psc)
+                        _plot_multi_psc_on_ax(ax, times, psc_traces, psc_labels, colors)
+                        if i == 0:
+                            ax.set_title("Postsynaptic Current")
                             ax.legend(loc="upper right", fontsize=8)
+                    else:
+                        psc_arr_2d = _to_numpy(psc)
+                        epsc_arr = (
+                            _to_numpy(epsc[:, neuron_idx]) if epsc is not None else None
+                        )
+                        ipsc_arr = (
+                            _to_numpy(ipsc[:, neuron_idx]) if ipsc is not None else None
+                        )
+                        input_arr_plot = (
+                            _to_numpy(input[:, neuron_idx])
+                            if input is not None
+                            else None
+                        )
+                        _plot_psc_on_ax(
+                            ax,
+                            times,
+                            psc_arr_2d[:, neuron_idx],
+                            epsc_arr,
+                            ipsc_arr,
+                            input_arr_plot,
+                            colors,
+                        )
+                        if i == 0:
+                            ax.set_title("Postsynaptic Current")
+                            if (
+                                epsc is not None
+                                or ipsc is not None
+                                or input is not None
+                            ):
+                                ax.legend(loc="upper right", fontsize=8)
 
                 if i == n_plot - 1:
                     ax.set_xlabel("Time (ms)")
@@ -1886,7 +1973,11 @@ def plot_neuron_traces(
             axes[(plot_row, c)] = fig.add_subplot(grid_spec[plot_row, c])
 
     asc_arr = _to_numpy(asc) if _show_asc else None
-    psc_arr = _to_numpy(psc) if _show_psc else None
+    # psc_arr is already converted to numpy earlier (with extra dim handling)
+    # input_arr for plotting (only if input is 2D, not when psc has extra dim)
+    input_arr = (
+        _to_numpy(input) if input is not None and not psc_has_extra_dim else None
+    )
     used_axes: set[tuple[int, int, int]] = set()
 
     for plot_idx, neuron_idx in enumerate(neuron_indices):
@@ -1977,23 +2068,45 @@ def plot_neuron_traces(
         # PSC subplot
         if _show_psc and psc_arr is not None:
             ax = axes[(plot_row, col_base + col_idx)]
-            epsc_arr = _to_numpy(epsc[:, neuron_idx]) if epsc is not None else None
-            ipsc_arr = _to_numpy(ipsc[:, neuron_idx]) if ipsc is not None else None
-            _plot_psc_on_ax(
-                ax,
-                times,
-                psc_arr[:, neuron_idx],
-                epsc_arr,
-                ipsc_arr,
-                local_colors,
-                linestyle=spec.linestyle,
-                linewidth=spec.linewidth,
-                alpha=spec.alpha,
-            )
-            if row_idx == 0:
-                ax.set_title("Postsynaptic Current")
-                if epsc is not None or ipsc is not None:
+            if psc_has_extra_dim:
+                # PSC has additional dimension: plot each component
+                psc_traces = psc_arr[:, neuron_idx, :]  # Shape: (time, n_psc)
+                _plot_multi_psc_on_ax(
+                    ax,
+                    times,
+                    psc_traces,
+                    psc_labels,
+                    local_colors,
+                    linestyle=spec.linestyle,
+                    linewidth=spec.linewidth,
+                    alpha=spec.alpha,
+                )
+                if row_idx == 0:
+                    ax.set_title("Postsynaptic Current")
                     ax.legend(loc="upper right", fontsize=8)
+            else:
+                # Standard PSC: plot total, epsc, ipsc, input
+                epsc_arr = _to_numpy(epsc[:, neuron_idx]) if epsc is not None else None
+                ipsc_arr = _to_numpy(ipsc[:, neuron_idx]) if ipsc is not None else None
+                input_arr_single = (
+                    input_arr[:, neuron_idx] if input_arr is not None else None
+                )
+                _plot_psc_on_ax(
+                    ax,
+                    times,
+                    psc_arr[:, neuron_idx],
+                    epsc_arr,
+                    ipsc_arr,
+                    input_arr_single,
+                    local_colors,
+                    linestyle=spec.linestyle,
+                    linewidth=spec.linewidth,
+                    alpha=spec.alpha,
+                )
+                if row_idx == 0:
+                    ax.set_title("Postsynaptic Current")
+                    if epsc is not None or ipsc is not None or input is not None:
+                        ax.legend(loc="upper right", fontsize=8)
             if row_idx == n_rows - 1:
                 ax.set_xlabel("Time (ms)")
             ax.grid(alpha=0.3, linewidth=0.5)
@@ -2125,12 +2238,13 @@ def _plot_psc_on_ax(
     psc_trace,
     epsc_trace,
     ipsc_trace,
+    input_trace,
     colors,
     linestyle="-",
     linewidth=0.8,
     alpha=1.0,
 ):
-    """Helper for PSC trace."""
+    """Helper for PSC trace with EPSC, IPSC, and input components."""
     ax.plot(
         times,
         psc_trace,
@@ -2160,5 +2274,66 @@ def _plot_psc_on_ax(
             alpha=0.7,
             linestyle="--",
             label="IPSC",
+        )
+    if input_trace is not None:
+        ax.plot(
+            times,
+            input_trace,
+            color=colors.get("input", "#9467bd"),  # Default purple
+            linewidth=0.6,
+            alpha=0.7,
+            linestyle=":",
+            label="Input",
+        )
+    ax.set_ylabel("PSC (pA)")
+
+
+def _plot_multi_psc_on_ax(
+    ax,
+    times,
+    psc_traces,
+    labels,
+    colors,
+    linestyle="-",
+    linewidth=0.8,
+    alpha=1.0,
+):
+    """Helper for PSC traces with multiple components (n_psc > 1).
+
+    Args:
+        ax: Matplotlib axis
+        times: Time array
+        psc_traces: Array of shape (time, n_psc)
+        labels: List of labels for each PSC component
+        colors: Color dictionary
+        linestyle: Line style
+        linewidth: Line width
+        alpha: Plot opacity
+    """
+    # Generate distinct colors if needed
+    n_components = psc_traces.shape[1]
+    base_colors = [
+        colors.get("psc", "#F18F01"),
+        colors.get("epsc", "#06A77D"),
+        colors.get("ipsc", "#D62246"),
+        "#9467bd",  # purple
+        "#8c564b",  # brown
+        "#e377c2",  # pink
+        "#7f7f7f",  # gray
+        "#bcbd22",  # yellow-green
+        "#17becf",  # cyan
+    ]
+
+    for i in range(n_components):
+        color = base_colors[i % len(base_colors)]
+        label = labels[i] if labels and i < len(labels) else f"PSC_{i}"
+        ax.plot(
+            times,
+            psc_traces[:, i],
+            color=color,
+            linewidth=linewidth,
+            linestyle=linestyle,
+            alpha=alpha,
+            label=label,
         )
     ax.set_ylabel("PSC (pA)")
