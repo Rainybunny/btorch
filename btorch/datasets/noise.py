@@ -22,8 +22,7 @@ Shape Conventions
 
 Stateful Behavior
 -----------------
-Layer classes (``OUNoiseLayer``, ``PoissonNoiseLayer``, ``PinkNoiseLayer``)
-maintain internal state between calls when ``stateful=True``:
+Layer classes maintain internal state between calls when ``stateful=True``:
 
 - OU: Stores current noise value (carries over between sequences)
 - Poisson: Stores last sampled value
@@ -39,6 +38,17 @@ All generators accept an optional ``torch.Generator`` for reproducible
 sampling. Note that multi-step OU uses vectorized convolution which may
 produce slightly different values than sequential single-step calls due
 to floating-point ordering.
+
+Learnable Parameters
+--------------------
+All layer classes use ParamBufferMixin to support learnable parameters:
+
+- ``scale``: Multiplicative scaling (default: 1.0)
+- ``bias``: Additive offset (default: 0.0)
+
+Parameters are trainable when their names are in ``trainable_param`` set.
+By default, parameters are stored as scalars for memory efficiency.
+Use ``trainable_shape="full"`` for per-neuron parameters.
 """
 
 from collections.abc import Sequence
@@ -46,9 +56,10 @@ from typing import Literal
 
 import torch
 import torch.nn.functional as F
-from torch import Tensor, nn
+from torch import Tensor
 
-from btorch.models import base, environ
+from btorch.models import environ
+from btorch.models.base import MemoryModule, ParamBufferMixin, normalize_n_neuron
 
 
 def _unflatten_td(seq: Tensor, rest_shape: Sequence[int]) -> Tensor:
@@ -190,7 +201,8 @@ def ou_noise(
         factors = torch.pow(alpha_flat[:, None], tpow[None, :])
         n_seq = n_from_u + noise0_flat[:, None] * factors
 
-    return _unflatten_td(n_seq, rest_shape)
+    out = _unflatten_td(n_seq, rest_shape)
+    return out
 
 
 def ou_noise_like(
@@ -281,7 +293,6 @@ def poisson_noise(
     lam = torch.as_tensor(rate, device=base.device, dtype=sample_dtype) * float(dt)
     if torch.any(lam < 0):
         raise ValueError("Poisson rate * dt must be non-negative.")
-
     lam_full = base + lam
     lam_seq = lam_full.unsqueeze(0).expand((T,) + tuple(size))
     return torch.poisson(lam_seq, generator=generator)
@@ -532,7 +543,66 @@ def pink_noise_like(
     )
 
 
-class OUNoiseLayer(base.MemoryModule):
+class _BaseNoiseLayer(MemoryModule, ParamBufferMixin):
+    """Base class for noise layers with consistent scale/bias interface.
+
+    All noise layers inherit from this class to provide:
+    - ``scale``: Multiplicative scaling (default: 1.0)
+    - ``bias``: Additive offset (default: 0.0)
+    - Support for trainable parameters via ``trainable_param`` set
+    - Default scalar parameter storage for memory efficiency
+
+    Args:
+        n_neuron: Number of neurons or shape of trailing neuron dims.
+        trainable_param: Set of parameter names to make trainable, or True/False
+            for all/none. Options: {"scale", "bias"}.
+        trainable_shape: Shape policy for trainable values:
+            - ``"scalar"`` (default): Store as scalar, broadcast to neurons
+            - ``"full"``: Store as full per-neuron tensor
+        step_mode: ``'s'`` for single-step, ``'m'`` for multi-step.
+        stateful: If True, maintain state between calls.
+    """
+
+    def __init__(
+        self,
+        n_neuron: int | Sequence[int],
+        *,
+        trainable_param: bool | set[str] = False,
+        trainable_shape: str = "scalar",
+        step_mode: Literal["s", "m"] = "m",
+        stateful: bool = False,
+    ):
+        super().__init__()
+        self.n_neuron, self.size = normalize_n_neuron(n_neuron)
+        self.step_mode = step_mode
+        self.stateful = stateful
+
+        # Store trainable_param for def_param to access
+        if isinstance(trainable_param, bool):
+            self.trainable_param = set() if not trainable_param else {"scale", "bias"}
+        else:
+            self.trainable_param = set(trainable_param)
+
+        # Define scale and bias with consistent interface
+        self.def_param(
+            "scale",
+            1.0,
+            trainable_param=self.trainable_param,
+            trainable_shape=trainable_shape,
+        )
+        self.def_param(
+            "bias",
+            0.0,
+            trainable_param=self.trainable_param,
+            trainable_shape=trainable_shape,
+        )
+
+    def _apply_scale_bias(self, noise: Tensor) -> Tensor:
+        """Apply scale and bias to generated noise."""
+        return noise * self.scale + self.bias
+
+
+class OUNoiseLayer(_BaseNoiseLayer):
     """Ornstein-Uhlenbeck (OU) noise layer for temporally correlated noise.
 
     Implements exact discretization of the OU process where ``sigma`` is the
@@ -545,6 +615,14 @@ class OUNoiseLayer(base.MemoryModule):
 
     The layer supports both single-step (stateful) and multi-step (vectorized)
     modes. In stateful mode, the noise state persists across forward calls.
+
+    Learnable parameters (inherited from _BaseNoiseLayer):
+        - ``scale``: Multiplicative scaling (default: 1.0)
+        - ``bias``: Additive offset (default: 0.0)
+
+    Additional OU-specific parameters:
+        - ``sigma``: Stationary standard deviation
+        - ``tau``: Time constant
 
     Tensor Conventions:
         - Multi-step input: Output shape is ``(T, *batch_dims, *n_neuron)``
@@ -567,14 +645,20 @@ class OUNoiseLayer(base.MemoryModule):
         sigma: Stationary standard deviation (scalar or per-neuron).
         tau: Time constant in same units as dt (scalar or per-neuron).
         step_mode: ``'s'`` for single-step, ``'m'`` for multi-step.
-        trainable: Whether sigma and tau are learnable parameters.
+        trainable_param: Set of parameter names to make trainable, or True/False
+            for all/none. Options: {"scale", "bias", "sigma", "tau"}.
+        trainable_shape: Shape policy for trainable values:
+            - ``"scalar"`` (default): Store as scalar, broadcast to neurons
+            - ``"full"``: Store as full per-neuron tensor
         stateful: If True, maintain noise state between calls (required for
             single-step mode).
         tau_min: Minimum value for tau (clamped for numerical stability).
 
     Attributes:
         noise: Current noise state tensor (only if ``stateful=True``).
-        sigma: Standard deviation (Parameter if trainable, else buffer).
+        scale: Output scaling (Parameter if trainable, else buffer).
+        bias: Output offset (Parameter if trainable, else buffer).
+        sigma: Stationary std dev (Parameter if trainable, else buffer).
         tau: Time constant (Parameter if trainable, else buffer).
     """
 
@@ -586,42 +670,45 @@ class OUNoiseLayer(base.MemoryModule):
         sigma: float | Tensor = 0.5,
         tau: float | Tensor = 10.0,
         step_mode: Literal["s", "m"] = "m",
-        trainable: bool = False,
+        trainable_param: bool | set[str] = False,
         *,
+        trainable_shape: str = "scalar",
         stateful: bool = False,
         tau_min: float = 1e-6,
     ):
-        super().__init__()
+        super().__init__(
+            n_neuron,
+            trainable_param=trainable_param,
+            trainable_shape=trainable_shape,
+            step_mode=step_mode,
+            stateful=stateful,
+        )
         if not stateful and step_mode == "s":
             raise ValueError("stateful must be True for single-step mode.")
-        self.step_mode = step_mode
-        self.stateful = stateful
-        self.n_neuron, self.size = base.normalize_n_neuron(n_neuron)
         self.tau_min = float(tau_min)
 
         # Memory state: stored as "n_0" (state BEFORE current step/sequence).
-        # Will be expanded lazily to match x[0] if register_memory does not
-        # include batch dims.
         if stateful:
             self.register_memory("noise", 0.0, self.n_neuron)
 
-        sigma_t = torch.as_tensor(sigma)
-        tau_t = torch.as_tensor(tau)
-
-        if trainable:
-            self.sigma = nn.Parameter(sigma_t)
-            self.tau = nn.Parameter(tau_t)
-        else:
-            self.register_buffer("sigma", sigma_t)
-            self.register_buffer("tau", tau_t)
+        # OU-specific parameters
+        self.def_param(
+            "sigma",
+            sigma,
+            trainable_param=self.trainable_param,
+            trainable_shape=trainable_shape,
+        )
+        self.def_param(
+            "tau",
+            tau,
+            trainable_param=self.trainable_param,
+            trainable_shape=trainable_shape,
+        )
 
     def single_step_forward(
         self, dt: float | None = None, *, generator: torch.Generator | None = None
     ) -> Tensor:
         """Single-step update of OU noise.
-
-        Uses ``self.noise`` for device, dtype, and shape. Returns the updated
-        noise tensor (no input ``x`` is required or used).
 
         Args:
             dt: Timestep (defaults to ``environ.get("dt")``).
@@ -635,15 +722,15 @@ class OUNoiseLayer(base.MemoryModule):
         sigma, tau = self.sigma, self.tau
         dt: float = dt if dt is not None else environ.get("dt")
 
-        alpha = torch.exp(-dt / tau)
-        beta = sigma * torch.sqrt(1.0 - torch.exp(-2.0 * dt / tau))
+        alpha = torch.exp(-dt / tau.clamp(min=self.tau_min))
+        beta = sigma * torch.sqrt(
+            1.0 - torch.exp(-2.0 * dt / tau.clamp(min=self.tau_min))
+        )
 
         self.noise = alpha * self.noise + beta * randn_like(
             self.noise, generator=generator
         )
-        return self.noise
-
-    # ---------------- public multi-step ----------------
+        return self._apply_scale_bias(self.noise)
 
     def multi_step_forward(
         self,
@@ -681,7 +768,7 @@ class OUNoiseLayer(base.MemoryModule):
         dt = dt if dt is not None else environ.get("dt")
         out = ou_noise(
             sigma=self.sigma,
-            tau=self.tau,
+            tau=self.tau.clamp(min=self.tau_min),
             T=T,
             dt=dt,
             noise0=self.noise,
@@ -691,17 +778,19 @@ class OUNoiseLayer(base.MemoryModule):
         if self.stateful:
             # Update self.noise to the final state after the sequence.
             self.noise = out[-1]
-        return out
+        return self._apply_scale_bias(out)
 
     def extra_repr(self) -> str:
         return (
             f"n_neuron={self.n_neuron}, sigma={self._format_repr_value(self.sigma)}, "
-            f"tau={self._format_repr_value(self.tau)}, step_mode={self.step_mode}, "
-            f"tau_min={self.tau_min}"
+            f"tau={self._format_repr_value(self.tau)}, "
+            f"scale={self._format_repr_value(self.scale)}, "
+            f"bias={self._format_repr_value(self.bias)}, "
+            f"step_mode={self.step_mode}, tau_min={self.tau_min}"
         )
 
 
-class PoissonNoiseLayer(base.MemoryModule):
+class PoissonNoiseLayer(_BaseNoiseLayer):
     """Poisson noise layer for discrete event generation.
 
     Generates Poisson-distributed event counts with rate scaled by ``dt``:
@@ -711,16 +800,29 @@ class PoissonNoiseLayer(base.MemoryModule):
     In stateful mode, the last sampled value is preserved as ``self.noise``
     and used as the initial state for subsequent calls.
 
+    Learnable parameters (inherited from _BaseNoiseLayer):
+        - ``scale``: Multiplicative scaling (default: 1.0)
+        - ``bias``: Additive offset (default: 0.0)
+
+    Additional Poisson-specific parameters:
+        - ``rate``: Events per unit time
+
     Args:
         n_neuron: Number of neurons or shape of trailing neuron dims.
         rate: Events per unit time (scalar or per-neuron, broadcastable).
         step_mode: ``'s'`` for single-step, ``'m'`` for multi-step.
-        trainable: Whether rate is a learnable parameter.
+        trainable_param: Set of parameter names to make trainable, or True/False
+            for all/none. Options: {"scale", "bias", "rate"}.
+        trainable_shape: Shape policy for trainable values:
+            - ``"scalar"`` (default): Store as scalar, broadcast to neurons
+            - ``"full"``: Store as full per-neuron tensor
         stateful: If True, maintain state between calls (required for
             single-step mode).
 
     Attributes:
         noise: Last sampled value (only if ``stateful=True``).
+        scale: Output scaling (Parameter if trainable, else buffer).
+        bias: Output offset (Parameter if trainable, else buffer).
         rate: Event rate (Parameter if trainable, else buffer).
     """
 
@@ -731,25 +833,31 @@ class PoissonNoiseLayer(base.MemoryModule):
         n_neuron: int | Sequence[int],
         rate: float | Tensor = 1.0,
         step_mode: Literal["s", "m"] = "m",
-        trainable: bool = False,
+        trainable_param: bool | set[str] = False,
         *,
+        trainable_shape: str = "scalar",
         stateful: bool = False,
     ):
-        super().__init__()
+        super().__init__(
+            n_neuron,
+            trainable_param=trainable_param,
+            trainable_shape=trainable_shape,
+            step_mode=step_mode,
+            stateful=stateful,
+        )
         if not stateful and step_mode == "s":
             raise ValueError("stateful must be True for single-step mode.")
-        self.step_mode = step_mode
-        self.stateful = stateful
-        self.n_neuron, self.size = base.normalize_n_neuron(n_neuron)
 
         if stateful:
             self.register_memory("noise", 0.0, self.n_neuron)
 
-        rate_t = torch.as_tensor(rate)
-        if trainable:
-            self.rate = nn.Parameter(rate_t)
-        else:
-            self.register_buffer("rate", rate_t)
+        # Poisson-specific parameter
+        self.def_param(
+            "rate",
+            rate,
+            trainable_param=self.trainable_param,
+            trainable_shape=trainable_shape,
+        )
 
     def single_step_forward(
         self, dt: float | None = None, *, generator: torch.Generator | None = None
@@ -775,7 +883,7 @@ class PoissonNoiseLayer(base.MemoryModule):
         lam = torch.zeros_like(self.noise) + lam
 
         self.noise = torch.poisson(lam, generator=generator)
-        return self.noise
+        return self._apply_scale_bias(self.noise)
 
     def multi_step_forward(
         self,
@@ -818,16 +926,17 @@ class PoissonNoiseLayer(base.MemoryModule):
         )
         if self.stateful:
             self.noise = out[-1]
-        return out
+        return self._apply_scale_bias(out)
 
     def extra_repr(self) -> str:
         return (
             f"n_neuron={self.n_neuron}, rate={self._format_repr_value(self.rate)}, "
-            f"step_mode={self.step_mode}"
+            f"scale={self._format_repr_value(self.scale)}, "
+            f"bias={self._format_repr_value(self.bias)}, step_mode={self.step_mode}"
         )
 
 
-class PinkNoiseLayer(base.MemoryModule):
+class PinkNoiseLayer(_BaseNoiseLayer):
     """Pink (1/f) noise layer using causal FIR filtering.
 
     Generates colored noise with PSD ~ 1/frequency by filtering white noise
@@ -837,10 +946,19 @@ class PinkNoiseLayer(base.MemoryModule):
     In stateful mode, the FIR history is preserved across calls for seamless
     continuation of noise sequences.
 
+    Learnable parameters (inherited from _BaseNoiseLayer):
+        - ``scale``: Multiplicative scaling (default: 1.0)
+        - ``bias``: Additive offset (default: 0.0)
+
     Args:
         n_neuron: Number of neurons or shape of trailing neuron dims.
         fir_order: Length of the FIR filter kernel (default 64).
         step_mode: ``'s'`` for single-step, ``'m'`` for multi-step.
+        trainable_param: Set of parameter names to make trainable, or True/False
+            for all/none. Options: {"scale", "bias"}.
+        trainable_shape: Shape policy for trainable values:
+            - ``"scalar"`` (default): Store as scalar, broadcast to neurons
+            - ``"full"``: Store as full per-neuron tensor
         stateful: If True, maintain FIR history between calls (required for
             single-step mode).
 
@@ -849,6 +967,8 @@ class PinkNoiseLayer(base.MemoryModule):
         white_history: Previous white noise samples for FIR continuity
             (shape ``(*n_neuron, fir_order-1)``).
         fir_order: Length of the FIR kernel.
+        scale: Output scaling (Parameter if trainable, else buffer).
+        bias: Output offset (Parameter if trainable, else buffer).
     """
 
     noise: Tensor
@@ -859,19 +979,24 @@ class PinkNoiseLayer(base.MemoryModule):
         n_neuron: int | Sequence[int],
         fir_order: int = 64,
         step_mode: Literal["s", "m"] = "m",
+        trainable_param: bool | set[str] = False,
         *,
+        trainable_shape: str = "scalar",
         stateful: bool = False,
     ):
-        super().__init__()
+        super().__init__(
+            n_neuron,
+            trainable_param=trainable_param,
+            trainable_shape=trainable_shape,
+            step_mode=step_mode,
+            stateful=stateful,
+        )
         if not stateful and step_mode == "s":
             raise ValueError("stateful must be True for single-step mode.")
         if fir_order < 1:
             raise ValueError(f"fir_order must be >= 1, got {fir_order}.")
 
-        self.step_mode = step_mode
-        self.stateful = stateful
         self.fir_order = int(fir_order)
-        self.n_neuron, self.size = base.normalize_n_neuron(n_neuron)
 
         if stateful:
             self.register_memory("noise", 0.0, self.n_neuron)
@@ -900,7 +1025,7 @@ class PinkNoiseLayer(base.MemoryModule):
         )
         self.noise = out[0]
         self.white_history = new_hist
-        return self.noise
+        return self._apply_scale_bias(self.noise)
 
     def multi_step_forward(
         self,
@@ -939,10 +1064,11 @@ class PinkNoiseLayer(base.MemoryModule):
         if self.stateful:
             self.noise = out[-1]
             self.white_history = new_hist
-        return out
+        return self._apply_scale_bias(out)
 
     def extra_repr(self) -> str:
         return (
             f"n_neuron={self.n_neuron}, fir_order={self.fir_order}, "
-            f"step_mode={self.step_mode}"
+            f"scale={self._format_repr_value(self.scale)}, "
+            f"bias={self._format_repr_value(self.bias)}, step_mode={self.step_mode}"
         )

@@ -35,7 +35,6 @@ coverage.xml
 .idea/
 .vs/
 .vscode/
-.kilocode/
 .~lock.*
 /local/
 /metadata/md5-cache
@@ -44,3 +43,5 @@ coverage.xml
 .agent/rules/env.md
 .codex
 .desloppify
+.kilocode/
+.kilo/

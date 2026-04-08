@@ -23,7 +23,7 @@ from btorch.models import environ
                 n_neuron=5,
                 sigma=0.5,
                 tau=10.0,
-                trainable=True,
+                trainable_param={"sigma", "tau"},
                 stateful=True,
                 step_mode="s",
             ),
@@ -34,7 +34,7 @@ from btorch.models import environ
             lambda: PoissonNoiseLayer(
                 n_neuron=5,
                 rate=2.0,
-                trainable=True,
+                trainable_param={"rate"},
                 stateful=True,
                 step_mode="s",
             ),
