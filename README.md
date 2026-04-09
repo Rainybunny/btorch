@@ -7,7 +7,7 @@ Use `btorch` if you need:
 
 - stateful neuron/synapse modules with explicit memory handling
 - practical support for sparse/connectome-style network structure
-- research-friendly training features (`torch.compile`, checkpointing,
+- torchn native training features (`torch.compile`, checkpointing,
   truncated BPTT)
 - solid runtime performance and ONNX export support
 - connectome import/export via SONATA, and flexible network definition coming soon  
@@ -27,26 +27,32 @@ We thank the developers of both libraries for the inspirations.
 - Memory state with static size and managed by torch buffer
   - onnx export is easy (note: sparse matrix is not supported by onnx)
 
-## For AI Agents / Coding Assistants
+## 🤖 For AI Agents / Coding Assistants
 
 **Copy and paste this prompt into your coding assistant:**
 
 ```text
 Install `btorch` for this repository.
 
-Before running commands, ask the user two things:
+Before running commands, ask the user three things:
 1. Does the user want `conda`/`micromamba` setup or `pip`-first setup?
 2. Which environment name should be used? (default: `ml-py312`)
+3. Do you want to install the forked version of omegaconf from https://github.com/alexfanqi/omegaconf? (default: yes)
+   - Optional but recommended. It narrows the feature gap with Tyro, including dataclass union type, `Literal`, `Sequence`. Most importantly, it allows single source of truth, dataclass centric config and domain models.
+   - If yes, install with: `pip install git+https://github.com/alexfanqi/omegaconf.git`
+   - If no, the standard PyPI version will be used (some features may not work).
 
 Then follow the matching path.
 
 Path A - Conda or Micromamba (recommended):
 - Create env from `dev-requirements.yaml` using the user-provided env name.
 - Activate the environment.
+- If user wants forked omegaconf: `pip install git+https://github.com/alexfanqi/omegaconf.git`
 - Run: `pip install -e . --config-settings editable_mode=strict`
 
 Path B - Pip-first:
 - Create and activate a virtual environment.
+- If user wants forked omegaconf: `pip install git+https://github.com/alexfanqi/omegaconf.git`
 - If `torch_scatter`/`torch_sparse` fail from PyPI, install wheels that match
   both the installed PyTorch version and CUDA version from:
   `https://data.pyg.org/whl/` (for example,
@@ -59,6 +65,7 @@ After install, verify with:
 Report:
 - chosen setup path
 - environment name
+- forked omegaconf choice
 - install/verification output
 - any follow-up actions needed
 ```
@@ -84,6 +91,14 @@ conda env create -n ml-py312 --file=dev-requirements.yaml
 
 # or using Micromamba
 micromamba env create -n ml-py312 -f dev-requirements.yaml
+```
+
+#### Forked OmegaConf (Optional but Recommended)
+
+This repository supports an enhanced fork of OmegaConf from `https://github.com/alexfanqi/omegaconf`. The fork narrows the feature gap with Tyro by adding support for dataclass unions, `Literal`, and `Sequence` types (see [omegaconf#144](https://github.com/omry/omegaconf/issues/144), [omegaconf#1233](https://github.com/omry/omegaconf/pull/1233)), while preserving OmegaConf's single-source-of-truth config priority: dataclass defaults → config file → CLI overrides. The forked version is required for the `omegaconf-config` skill. To install it:
+
+```bash
+pip install git+https://github.com/alexfanqi/omegaconf.git
 ```
 
 #### Note on `pip` and `pytorch_sparse`

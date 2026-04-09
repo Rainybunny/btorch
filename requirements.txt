@@ -5,6 +5,8 @@ scipy>=1.10
 jaxtyping>=0.2.20
 typing-extensions>=4.5
 spikingjelly
+# Forked omegaconf from https://github.com/alexfanqi/omegaconf
+# For standard install: pip install git+https://github.com/alexfanqi/omegaconf.git
 omegaconf
 hdf5plugin
 plotly

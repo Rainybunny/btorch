@@ -3,7 +3,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
-from omegaconf import OmegaConf
 
 from btorch.utils.conf import (
     diff_conf,
@@ -11,6 +10,10 @@ from btorch.utils.conf import (
     load_config,
     to_dotlist,
 )
+
+
+omegaconf = pytest.importorskip("omegaconf")
+from omegaconf import OmegaConf  # noqa: E402
 
 
 @dataclass

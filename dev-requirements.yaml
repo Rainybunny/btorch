@@ -9,6 +9,8 @@ dependencies:
   - pytorch_sparse
   - pip
   - pip:
+    # Forked omegaconf for enhanced features (required for omegaconf-config skill)
+    - git+https://github.com/alexfanqi/omegaconf.git
     # profiling
     - tensorboard_plugin_profile
     # dynamic tools

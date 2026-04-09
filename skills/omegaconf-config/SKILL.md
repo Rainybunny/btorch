@@ -5,6 +5,17 @@ description: Dataclass-first configuration using OmegaConf with OOP domain model
 
 # OmegaConf Configuration (Dataclass-First)
 
+> **Dependency Notice:** This skill requires the forked version of OmegaConf from
+> `https://github.com/alexfanqi/omegaconf`. The fork narrows the feature gap with
+> Tyro by adding support for dataclass unions, `Literal`, and `Sequence` types
+> (see [omegaconf#144](https://github.com/omry/omegaconf/issues/144),
+> [omegaconf#1233](https://github.com/omry/omegaconf/pull/1233)), enabling
+> single-source-of-truth, dataclass-centric config with OmegaConf's priority
+> merging (dataclass defaults → config file → CLI overrides).
+> ```bash
+> pip install git+https://github.com/alexfanqi/omegaconf.git
+> ```
+
 ## When to Use (Compatibility Gate)
 
 Use this skill only for dataclass-first OmegaConf workflows.
