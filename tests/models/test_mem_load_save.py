@@ -57,6 +57,9 @@ def def_model(neuron_params, device, dtype):
     conn = linear.SparseConn(conn=rec_weights, device=device)
 
     tau_syn = torch.cat([torch.ones(n_e_neurons) * 5.8, torch.ones(n_i_neurons) * 6.5])
+
+    # AlphaPSCBilleh requires dt to be set in environment at initialization
+    environ.set(dt=1.0)
     psc_module = synapse.AlphaPSCBilleh(
         n_neurons,
         tau_syn=tau_syn,

@@ -7,7 +7,7 @@ from .aggregation import (
     group_summary,
     group_values,
 )
-from .branching import MR_estimation
+from .branching import branching_ratio
 from .connectivity import HopDistanceModel, compute_ie_ratio
 from .metrics import indices_to_mask, select_on_metric
 from .spiking import (
@@ -43,7 +43,7 @@ __all__ = [
     "group_values",
     "group_summary",
     "group_ecdf",
-    "MR_estimation",
+    "branching_ratio",
     "HopDistanceModel",
     "compute_ie_ratio",
     "indices_to_mask",

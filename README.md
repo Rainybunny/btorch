@@ -165,18 +165,20 @@ python -m sphinx.cmd.build docs docs/_build/html
 
 The `skills/` directory contains usage patterns and tips for using btorch with AI agent. These are provided as reference and may not represent optimal configurations for every use case.
 
-## TODO List
+## Road Map
 
 - [x] support multi-dim batch size and neuron
 - [ ] cleaner connectome import, network param management and manipulation lib
-  - [ ] compat with bmtk
   - [ ] support full SONATA format (both [BlueBrain](https://github.com/openbraininstitute/libsonata.git) and [AIBS](https://github.com/AllenInstitute/sonata) variants)
   - [ ] flexible like [neuroarch](https://github.com/fruitflybrain/neuroarch.git) and tiny to integrate. thinking about using DuckDB
 - [ ] verify numerical accuracy. align with Neuron and Brainstate
 - [ ] support automatic conversion between stateful and pure functions
   - similar to make_functional in [torchopt](https://github.com/metaopt/torchopt)
   - [ ] consider migrate to pure memory states instead of register_memory. gradient checkpointing + torch.compile struggles with mutating self
-- [ ] integrate large-scale training support with [torchtitan](https://github.com/pytorch/torchtitan.git)
+- [ ] sparse matrix multiplication optimisation on GPU
+- [ ] large scale multi-device training and simulation
+  - [ ] integrate large-scale training support with [torchtitan](https://github.com/pytorch/torchtitan.git)
+  - [ ] work distribution and balancing
 - [ ] compat with [neurobench](https://github.com/NeuroBench/neurobench.git), [Tonic](https://tonic.readthedocs.io/en/latest/)
 - [ ] [NIR](https://github.com/neuromorphs/NIR.git) import and export
 

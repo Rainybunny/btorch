@@ -313,14 +313,12 @@ def _validate_and_infer_dims(
     # Re-run logic to find which valid physical dims belong to 'neuron'
     # We need to know which index in dim_names corresponds to 'neuron'.
     # Usually it's the last one.
-    try:
+    if "neuron" in dim_names:
         neuron_idx = dim_names.index("neuron")
         # How many dims before it?
         pre_dims = sum(resolved_counts[:neuron_idx])
         n_dims = resolved_counts[neuron_idx]
         neuron_group_dims = all_mapped_dims[pre_dims : pre_dims + n_dims]
-    except ValueError:
-        pass
 
     return resolved_counts, all_mapped_dims, neuron_group_dims
 
@@ -523,7 +521,7 @@ def memories_to_xarray(
             extra_count = n_dims - len(all_mapped_dims)
             for i in range(extra_count):
                 # private extra dim
-                current_dims.append(f"{var_name}_dim_{len(all_mapped_dims)+i}")
+                current_dims.append(f"{var_name}_dim_{len(all_mapped_dims) + i}")
         else:
             # Rank deficiency.
             # Maybe (T, N) only (B=0)?

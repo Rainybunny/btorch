@@ -267,11 +267,9 @@ class AlphaPSCBilleh(_Adaptive2VarPSC):
 
         super().__init__(n_neuron, linear, step_mode, backend)
 
-        try:
-            dt = environ.get("dt")
-            assert dt == 1.0, "dt must be 1.0 for this model"
-        except KeyError:
-            pass
+        dt = environ.get("dt", None)
+        if dt is not None and dt != 1.0:
+            raise ValueError(f"dt must be 1.0 for this model, got {dt}")
 
         self.register_buffer("tau_syn", torch.as_tensor(tau_syn), persistent=False)
 

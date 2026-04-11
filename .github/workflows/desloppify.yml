@@ -30,45 +30,56 @@ jobs:
       - name: Install desloppify
         run: uv pip install "desloppify[full]" --system
 
-      - name: Get base branch score
+      - name: Get base branch scan
         id: base
         run: |
           git fetch origin ${{ github.base_ref }}
           git checkout origin/${{ github.base_ref }}
-          base_score=$(desloppify scan --format json . 2>/dev/null | jq -r '.score // empty' || echo "")
+          base_output=$(desloppify scan --profile ci 2>&1 || true)
+          base_score=$(echo "$base_output" | grep -oP 'Scores:.*overall\s+\K[0-9.]+' || echo "")
           echo "score=$base_score" >> $GITHUB_OUTPUT
+          # Store output for potential use
+          echo "$base_output" > /tmp/base_scan.txt
           git checkout -
 
-      - name: Get PR branch score
+      - name: Get PR branch scan
         id: pr
         run: |
-          pr_score=$(desloppify scan --format json . 2>/dev/null | jq -r '.score // empty' || echo "")
+          pr_output=$(desloppify scan --profile ci 2>&1 || true)
+          pr_score=$(echo "$pr_output" | grep -oP 'Scores:.*overall\s+\K[0-9.]+' || echo "")
           echo "score=$pr_score" >> $GITHUB_OUTPUT
+          # Store full output
+          echo "$pr_output" > /tmp/pr_scan.txt
 
       - name: Comment PR with desloppify results
         uses: actions/github-script@v7
         with:
           script: |
+            const fs = require('fs');
             const baseScore = `${{ steps.base.outputs.score }}`;
             const prScore = `${{ steps.pr.outputs.score }}`;
+            const prOutput = fs.readFileSync('/tmp/pr_scan.txt', 'utf8');
 
             let body = '## Desloppify Quality\n\n';
 
             if (prScore) {
-              body += `Score: ${prScore}`;
+              body += `**Score:** ${prScore}/100`;
 
               if (baseScore) {
                 const diff = (parseFloat(prScore) - parseFloat(baseScore)).toFixed(2);
                 const sign = diff > 0 ? '+' : '';
-                body += ` (${sign}${diff} vs base)`;
+                const emoji = diff > 0 ? '📈' : diff < 0 ? '📉' : '➡️';
+                body += ` (${emoji} ${sign}${diff} vs base)`;
               }
 
               body += '\n\n';
             }
 
-            body += '<details><summary>Full report</summary>\n\n';
-            body += 'Run `desloppify scan` locally for details.\n';
-            body += '</details>';
+            body += '<details>\n<summary>Full report</summary>\n\n';
+            body += '```\n';
+            body += prOutput;
+            body += '\n```\n';
+            body += '</details>\n';
 
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,

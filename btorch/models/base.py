@@ -697,9 +697,13 @@ class MemoryModule(base.MemoryModule):
                     return
             reset_kwargs = {**value.__dict__, **reset_kwargs}
 
-        assert "value" in reset_kwargs
+        if "value" not in reset_kwargs:
+            raise ValueError(f"'value' is required for register_memory_rv('{name}')")
         if name not in self._memories_rv:
-            assert "sizes" in reset_kwargs
+            if "sizes" not in reset_kwargs:
+                raise ValueError(
+                    f"'sizes' is required when registering new memory_rv '{name}'"
+                )
             if "has_batch" not in reset_kwargs:
                 reset_kwargs["has_batch"] = False
 
@@ -709,9 +713,12 @@ class MemoryModule(base.MemoryModule):
             return
 
         if "sizes" in reset_kwargs:
-            assert not strict or (
-                self._memories_rv[name].sizes == reset_kwargs["sizes"]
-            )
+            if strict and self._memories_rv[name].sizes != reset_kwargs["sizes"]:
+                raise ValueError(
+                    f"Memory_rv '{name}' sizes mismatch: "
+                    f"existing={self._memories_rv[name].sizes}, "
+                    f"new={reset_kwargs['sizes']}"
+                )
         else:
             reset_kwargs["sizes"] = self._memories_rv[name].sizes
 
