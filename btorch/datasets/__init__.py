@@ -33,12 +33,12 @@ Functional API
     - [`pink_noise_like`](btorch/datasets/noise.py:344): Pink noise with
       reference tensor
 
-Layer API (stateful)
---------------------
+Layer API
+---------
     - [`OUNoiseLayer`](btorch/datasets/noise.py:367): Stateful OU noise
       module with single/multi-step modes
-    - [`PoissonNoiseLayer`](btorch/datasets/noise.py:510): Stateful Poisson
-      module
+    - [`PoissonNoiseLayer`](btorch/datasets/noise.py:510): Stateless Poisson
+      encoder/generator module
     - [`PinkNoiseLayer`](btorch/datasets/noise.py:603): Stateful pink noise
       module with FIR history
 

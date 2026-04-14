@@ -10,6 +10,7 @@ from torch import Tensor
 
 from btorch.config import SPARSE_BACKEND
 
+from .base import ParamBufferMixin
 from .constrain import HasConstraint
 
 
@@ -41,23 +42,34 @@ def available_sparse_backends() -> list[SparseBackend]:
     return backends
 
 
-class LearnableScale(nn.Module):
+class LearnableScale(ParamBufferMixin, nn.Module):
+    """Learnable scalar affine transform via softplus-parameterized scale/bias.
+
+    This is the idiomatic way to apply learnable scaling and offset to
+    noise generators or other modules: wrap them with ``LearnableScale``.
+
+    trainable controls which parts are trainable:
+      - True: both ``scale`` and ``bias`` (if present) are trainable
+      - False: neither is trainable (stored as buffers)
+      - "scale": only ``scale`` is trainable
+      - "bias": only ``bias`` is trainable (requires ``bias`` to be provided)
+
+    Args:
+        scale: Initial scale value (softplus-ed internally, so always > 0).
+        bias: Initial bias value (softplus-ed internally, so always > 0).
+            If None, no bias term is applied.
+        trainable: Which components are trainable.
+    """
+
     def __init__(
         self,
         scale: float = 1.0,
         bias: float | None = None,
         trainable: bool | Literal["bias", "scale"] = True,
     ):
-        """Learnable scalar with optional trainability control.
+        ParamBufferMixin.__init__(self)
+        nn.Module.__init__(self)
 
-        trainable controls which parts are trainable:
-          - True: both `scale` and `bias` (if present) are trainable
-          - False: neither is trainable (stored as buffers)
-          - "scale": only `scale` is trainable
-          - "bias": only `bias` is trainable (requires `bias` to be provided)
-        """
-        super().__init__()
-        # runtime validation of trainable argument
         if not (
             trainable is True or trainable is False or trainable in ("bias", "scale")
         ):
@@ -65,38 +77,58 @@ class LearnableScale(nn.Module):
         if trainable == "bias" and bias is None:
             raise ValueError("trainable='bias' requires a non-None bias value")
 
-        self.trainable = trainable
+        self.has_bias = bias is not None
 
-        scale_init = torch.log(torch.exp(torch.tensor(float(scale))) - 1.0)
-        # create either a Parameter (trainable) or a buffer (fixed)
-        if trainable is True or trainable == "scale":
-            self.scale = nn.Parameter(scale_init)
+        # Build trainable_param set for def_param
+        if trainable is True:
+            tp = {"scale", "bias"} if self.has_bias else {"scale"}
+        elif trainable is False:
+            tp = set()
+        elif trainable == "scale":
+            tp = {"scale"}
         else:
-            # register as buffer so it's moved with the module but not trained
-            self.register_buffer("scale", scale_init)
+            tp = {"bias"}
 
-        if bias is not None:
-            bias_init = torch.log(torch.exp(torch.tensor(float(bias))))
-            if trainable is True or trainable == "bias":
-                self.bias = nn.Parameter(bias_init)
-            else:
-                self.register_buffer("bias", bias_init)
-        else:
-            self.bias = None
+        def _inv_softplus(y: float) -> torch.Tensor:
+            # softplus(x) = log(1 + exp(x)); inverse is log(exp(y) - 1).
+            # Clamp for y == 0 to avoid -inf.
+            val = torch.exp(torch.tensor(float(y))) - 1.0
+            return torch.log(val.clamp_min(1e-8))
 
-    def forward(self, x):
+        scale_init = _inv_softplus(scale)
+        self.def_param(
+            "scale",
+            scale_init,
+            sizes=(),
+            trainable_param=tp,
+            trainable_shape="scalar",
+        )
+
+        if self.has_bias:
+            bias_init = _inv_softplus(bias)
+            self.def_param(
+                "bias",
+                bias_init,
+                sizes=(),
+                trainable_param=tp,
+                trainable_shape="scalar",
+            )
+
+    def forward(self, x: Tensor) -> Tensor:
         out = self.scale_value * x
-        if self.bias is not None:
-            out += self.bias_value
+        if self.has_bias:
+            out = out + self.bias_value
         return out
 
     @property
-    def scale_value(self):
+    def scale_value(self) -> Tensor:
         return nn.functional.softplus(self.scale)
 
     @property
-    def bias_value(self):
-        return nn.functional.softplus(self.bias) if self.bias is not None else None
+    def bias_value(self) -> Tensor:
+        if not self.has_bias:
+            raise AttributeError("bias_value is unavailable when bias=None")
+        return nn.functional.softplus(self.bias)
 
 
 # TODO: cleanup and abstract out the logic of native and torch_sparse backends

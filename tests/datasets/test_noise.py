@@ -16,7 +16,7 @@ from btorch.models import environ
 
 
 @pytest.mark.parametrize(
-    ("layer_factory", "param_names"),
+    ("layer_factory", "param_names", "needs_state"),
     [
         pytest.param(
             lambda: OUNoiseLayer(
@@ -28,6 +28,7 @@ from btorch.models import environ
                 step_mode="s",
             ),
             ("sigma", "tau"),
+            True,
             id="ou",
         ),
         pytest.param(
@@ -35,31 +36,35 @@ from btorch.models import environ
                 n_neuron=5,
                 rate=2.0,
                 trainable_param={"rate"},
-                stateful=True,
-                step_mode="s",
+                step_mode="m",
             ),
             ("rate",),
+            False,
             id="poisson",
         ),
     ],
 )
-def test_noise_layer_trainable(layer_factory, param_names):
+def test_noise_layer_trainable(layer_factory, param_names, needs_state):
     with environ.context(dt=1.0):
         noise_layer = layer_factory()
-        noise_layer.init_state(batch_size=10)
+        if needs_state:
+            noise_layer.init_state(batch_size=10)
         for name in param_names:
             assert isinstance(getattr(noise_layer, name), torch.nn.Parameter)
 
         # Check gradients
-        # single-step API no longer requires an input tensor
-        y = noise_layer.single_step_forward()
+        if needs_state:
+            y = noise_layer.single_step_forward()
+        else:
+            y = noise_layer.forward()
         y.sum().backward()
 
         for name in param_names:
             grad = getattr(noise_layer, name).grad
             assert grad is not None
             assert torch.isfinite(grad).all()
-        assert noise_layer.noise.shape == (10, 5)
+        if needs_state:
+            assert noise_layer.noise.shape == (10, 5)
 
 
 def test_ou_noise_functional_like():
@@ -131,16 +136,49 @@ def test_poisson_noise_functional_like():
 
 
 def test_poisson_noise_layer_multistep():
-    """Poisson layer should support vectorized multi-step and state updates."""
+    """Poisson layer should support generator and encoder modes."""
     with environ.context(dt=1.0):
-        layer = PoissonNoiseLayer(n_neuron=4, rate=3.0, step_mode="m", stateful=True)
-        layer.init_state(batch_size=2)
+        # Generator mode: use constructor rate
+        layer = PoissonNoiseLayer(n_neuron=4, rate=3.0, step_mode="m")
 
         gen = torch.Generator().manual_seed(13)
         y = layer.multi_step_forward(7, generator=gen)
-        assert y.shape == (7, 2, 4)
+        assert y.shape == (7, 4)
         assert torch.all(y >= 0)
-        assert torch.allclose(layer.noise, y[-1])
+        assert not hasattr(layer, "noise")
+
+        # Encoder mode: override with per-neuron rate input
+        rate = torch.rand(2, 4) * 5
+        gen = torch.Generator().manual_seed(14)
+        y_enc = layer.multi_step_forward(7, rate=rate, generator=gen)
+        assert y_enc.shape == (7, 2, 4)
+        assert torch.all(y_enc >= 0)
+
+        # Encoder mode with per-timestep rates
+        rates = torch.rand(7, 2, 4) * 2
+        gen = torch.Generator().manual_seed(15)
+        y_ts = layer.multi_step_forward(7, rate=rates, generator=gen)
+        assert y_ts.shape == (7, 2, 4)
+        assert torch.all(y_ts >= 0)
+
+
+def test_poisson_noise_layer_forward():
+    """Poisson layer forward should work as single-step encoder."""
+    with environ.context(dt=1.0):
+        layer = PoissonNoiseLayer(n_neuron=3, rate=1.0, scale=0.5, bias=0.1)
+
+        # Generator mode
+        gen = torch.Generator().manual_seed(20)
+        y = layer.forward(generator=gen)
+        assert y.shape == (3,)
+        assert torch.all(y >= 0)
+
+        # Encoder mode with custom rate
+        rate = torch.tensor([2.0, 3.0, 4.0])
+        gen = torch.Generator().manual_seed(21)
+        y_enc = layer.forward(rate=rate, generator=gen)
+        assert y_enc.shape == (3,)
+        assert torch.all(y_enc >= 0)
 
 
 def test_pink_noise_functional_and_layer():
