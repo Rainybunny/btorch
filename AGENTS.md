@@ -5,7 +5,7 @@ Btorch is a brain-inspired Torch library for neuromorphic research. Follow the p
 ## Repo focus
 
 - Primary package: `btorch/` (models, connectome tools, analysis, visualization).
-- Docs live in `docs/`; examples in `examples/`.
+- Docs live in `docs/en/docs/`; examples in `examples/`.
 - Avoid adding new heavy dependencies unless explicitly requested.
 - Connectome tooling lives under `btorch/connectome/`; keep data transforms explicit and reversible.
 - Neuron models live under `btorch/models/neurons/`; follow existing parameter/state patterns.
@@ -70,20 +70,12 @@ Key patterns:
 ## Tests and checks
 
 - Lint: `ruff check .`
-- Tests: `pytest tests`
-- Docs: `python -m sphinx.cmd.build docs docs/_build/html`
-
-Run the smallest relevant subset when possible; call out if tests were not run.
-Recommended targeted runs:
-
-- Neurons: `pytest tests/models -k neuron`
-- Connectome: `pytest tests/connectome`
-- Visualization: `pytest tests/visualisation`
-If unsure, run the full suite.
+- Tests: `pytest tests` or targeted subfolders
+- Docs: `python scripts/docs.py build-all` (builds all languages into `site/`)
 
 ## Documentation
 
-- Update `docs/` for user-facing changes.
+- Update `docs/en/docs/` for user-facing changes.
 - Update `README.md` for installation or workflow changes.
 
 ## Contribution workflow

@@ -68,8 +68,8 @@
 - 任何需要的后续操作
 ```
 
-安装说明请参阅 [docs/installation.md](docs/installation.md)。  
-开发工作流和贡献指南请参阅 [docs/en/docs/development.md](docs/en/docs/development.md)。
+安装说明请参阅 [docs/installation.md](docs/zh/docs/installation.md)。  
+开发工作流和贡献指南请参阅 [docs/development.md](docs/zh/docs/development.md)。
 
 ## 文档
 

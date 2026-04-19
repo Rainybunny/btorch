@@ -71,8 +71,8 @@ Report:
 - any follow-up actions needed
 ```
 
-For setup instructions, see [docs/installation.md](docs/installation.md).  
-For development workflow and contributing guidelines, see [docs/en/docs/development.md](docs/development.md).
+For setup instructions, see [docs/installation.md](docs/en/docs/installation.md).  
+For development workflow and contributing guidelines, see [docs/development.md](docs/en/docs/development.md).
 
 ## Documentation
 

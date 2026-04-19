@@ -57,7 +57,7 @@ pytest tests/visualisation
 
 ## 文档
 
-- 任何面向用户的 API 变更都需要更新 `docs/`。
+- 任何面向用户的 API 变更都需要以英文更新 `docs/en/docs/`， ci会自动同步中文文档`docs/zh/docs/`。
 - 安装或工作流变更需要更新 `README.md`。
 - 新的 API 页面应使用 `mkdocstrings`（`::: btorch.module.path`），而不是手写签名。
 
