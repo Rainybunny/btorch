@@ -46,3 +46,4 @@ coverage.xml
 .desloppify
 .kilocode/
 .kilo/
+test/

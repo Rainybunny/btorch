@@ -14,7 +14,7 @@ from . import (
     surrogate,
 )
 from .dlif import DBNN, DLIF, DendriticLIF
-from .neurons import alif, glif, lif
+from .neurons import alif, glif, lif, spikenet
 
 
 __all__ = [
@@ -28,6 +28,7 @@ __all__ = [
     "glif",
     "alif",
     "lif",
+    "spikenet",
     "history",
     "init",
     "linear",
