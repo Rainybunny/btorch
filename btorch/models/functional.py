@@ -32,9 +32,10 @@ def init_net_state(
     def fn(m: nn.Module):
         if hasattr(m, "init_state") and callable(m.init_state):
             # can be a torch.compiled module
+            orig_mod = getattr(m, "_orig_mod", None)
             if not (
                 isinstance(m, base.MemoryModule)
-                or isinstance(m._orig_mod, base.MemoryModule)
+                or isinstance(orig_mod, base.MemoryModule)
             ):
                 logging.warning(
                     f"Trying to call `init_state()` of {m}, which is not "
@@ -69,9 +70,10 @@ def reset_net(
 
     def fn(m: nn.Module):
         if hasattr(m, "reset") and callable(m.reset):
+            orig_mod = getattr(m, "_orig_mod", None)
             if not (
                 isinstance(m, base.MemoryModule)
-                or isinstance(m._orig_mod, base.MemoryModule)
+                or isinstance(orig_mod, base.MemoryModule)
             ):
                 logging.warning(
                     f"Trying to call `reset()` of {m}, which is not "
