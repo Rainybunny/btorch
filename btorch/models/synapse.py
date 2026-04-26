@@ -1,3 +1,4 @@
+import math
 from collections.abc import Iterable, Sequence
 from typing import Protocol
 
@@ -415,6 +416,297 @@ class DualExponentialPSC(BasePSC):
         a_d = torch.exp(-dt / self.tau_decay)
         t = torch.arange(kernel_len, dtype=self.a.dtype, device=self.a.device)
         return self.a * (a_d**t - a_r**t)
+
+
+class SpikeNetExponentialPSC(BasePSC):
+    """Multi-delay exponential PSC following the SpikeNet synapse model.
+
+    Models per-delay-step fixed weight matrices with first-order exponential
+    decay.  For a fully-recurrent network where every neuron is both
+    pre- and post-synaptic:
+
+        psc[t] = alpha * psc[t-1]  +  sum_{d in delay_keys}  W_d @ z[t-d]
+        alpha  = exp(-dt / tau_syn)
+
+    Weight matrices are registered as **non-trainable** buffers.  For large
+    sparse networks set ``use_sparse=True`` to store them as CSR tensors.
+
+    This class implements one receptor channel (AMPA **or** GABA).  Use
+    :class:`SpikeNetCompositePSC` to combine multiple channels.
+
+    Args:
+        n_neuron: Number of neurons (pre == post in fully-recurrent networks).
+        weights_by_delay: ``{delay_step: weight_matrix}`` where each matrix
+            has shape ``[n_post, n_pre]``.  Matrices may already be sparse.
+        tau_syn: Synaptic exponential decay time constant (ms). Default: 5.0.
+        use_sparse: Convert weight matrices to sparse CSR format.
+            Strongly recommended for large networks with < 20 % density.
+            Default: False.
+        use_circular_buffer: Use in-place circular history buffer (memory-
+            efficient but not autograd-compatible).  Set ``False`` (default)
+            for gradient-based training.
+        step_mode: Step mode. Only ``"s"`` is supported. Default: ``"s"``.
+        backend: Compute backend. Default: ``"torch"``.
+    """
+
+    tau_syn: Tensor
+
+    def __init__(
+        self,
+        n_neuron: int | Sequence[int],
+        weights_by_delay: dict[int, Tensor],
+        tau_syn: float = 5.0,
+        E_rev: float | None = None,
+        use_sparse: bool = False,
+        use_circular_buffer: bool = False,
+        step_mode: str = "s",
+        backend: str = "torch",
+    ) -> None:
+        # nn.Identity() is a harmless placeholder; adaptation_charge is fully
+        # overridden so self.linear is never called.
+        super().__init__(
+            n_neuron=n_neuron,
+            linear=nn.Identity(),
+            step_mode=step_mode,
+            backend=backend,
+        )
+
+        self.register_buffer(
+            "tau_syn",
+            torch.as_tensor(tau_syn, dtype=torch.float32),
+            persistent=False,
+        )
+        self.E_rev = E_rev
+        self.use_sparse = bool(use_sparse)
+
+        self._delay_keys: list[int] = sorted(int(k) for k in weights_by_delay)
+        self._max_delay: int = max(self._delay_keys) if self._delay_keys else 0
+
+        for d in self._delay_keys:
+            W = weights_by_delay[d]
+            if isinstance(W, torch.Tensor):
+                W = W.clone()
+            else:
+                W = torch.as_tensor(W)
+            if use_sparse and not W.is_sparse and not W.is_sparse_csr:
+                W = W.to_sparse_csr()
+            self.register_buffer(f"_w_{d}", W, persistent=False)
+
+        # Spike history for tracking past spikes at each delay step.
+        # n_neuron here is the pre-synaptic count (== post in fully-recurrent).
+        self.history = SpikeHistory(
+            n_neuron=self.n_neuron,
+            max_delay_steps=self._max_delay + 1,
+            use_circular_buffer=use_circular_buffer,
+        )
+
+    # ------------------------------------------------------------------
+    # State management (delegate history initialisation)
+    # ------------------------------------------------------------------
+
+    def init_state(
+        self,
+        batch_size=None,
+        dtype=None,
+        device=None,
+        persistent=True,
+        skip_mem_name: Iterable[str] = (),
+    ) -> None:
+        super().init_state(batch_size, dtype, device, persistent, skip_mem_name)
+        self.history.init_state(batch_size, dtype, device, persistent)
+
+    def reset(
+        self,
+        batch_size=None,
+        dtype=None,
+        device=None,
+        skip_mem_name: Iterable[str] = (),
+    ) -> None:
+        super().reset(batch_size, dtype, device, skip_mem_name)
+        self.history.reset(batch_size, dtype, device)
+
+    # ------------------------------------------------------------------
+    # PSC dynamics
+    # ------------------------------------------------------------------
+
+    def conductance_charge(self) -> None:
+        """Exponential decay: psc *= exp(-dt / tau_syn)."""
+        dt = float(environ.get("dt"))
+        alpha = math.exp(-dt / max(float(self.tau_syn), 1e-9))
+        self.psc = alpha * self.psc
+
+    def adaptation_charge(self, z: Tensor) -> None:
+        """Push z into history, then accumulate all delayed contributions."""
+        z_flat, leading = self._flatten_neuron(z)
+        self.history.update(z_flat)
+
+        driven = torch.zeros_like(self.psc)
+        for d in self._delay_keys:
+            z_past = self.history.get_delay(d)          # (*batch, size)
+            W: Tensor = getattr(self, f"_w_{d}")        # [size, size]
+
+            if self.use_sparse:
+                # sparse_csr @ dense:  W [N,N] × z_past.T [N,B] → [N,B] → [B,N]
+                z_2d = z_past.reshape(-1, self.size)    # [flat_B, N]
+                contrib = torch.mm(W, z_2d.T).T         # [flat_B, N]
+                contrib = contrib.reshape(*leading, self.size)
+            else:
+                # F.linear broadcasts over any leading batch dims
+                contrib = F.linear(z_past, W)           # (*batch, N)
+
+            driven = driven + self._unflatten_neuron(contrib, leading)
+
+        self.psc = self.psc + driven
+
+    def get_kernel(self, dt: float, kernel_len: int) -> Tensor:
+        """Approximate exponential impulse-response kernel (single-delay)."""
+        a = torch.exp(-dt / self.tau_syn)
+        t = torch.arange(kernel_len, dtype=a.dtype, device=a.device)
+        return a ** t
+
+    def current(self, v: Tensor) -> Tensor:
+        """Return conductance-based synaptic current (nA) given membrane voltage v (mV).
+
+        I = psc * (E_rev - v),  where psc stores conductance (µS).
+        Only valid when E_rev was provided at construction.
+        """
+        if self.E_rev is None:
+            raise ValueError(
+                "E_rev not set on this SpikeNetExponentialPSC; "
+                "cannot compute conductance-based current."
+            )
+        return self.psc * (self.E_rev - v)
+
+    def extra_repr(self) -> str:
+        if self._delay_keys:
+            d_range = f"[{self._delay_keys[0]}, {self._delay_keys[-1]}]"
+        else:
+            d_range = "[]"
+        return (
+            f"tau_syn={float(self.tau_syn):.2g} ms, "
+            f"n_delay_buckets={len(self._delay_keys)}, "
+            f"delay_range={d_range}, "
+            f"use_sparse={self.use_sparse}"
+        )
+
+
+class SpikeNetCompositePSC(MemoryModule):
+    """Composite PSC combining AMPA and GABA channels for SpikeNet networks.
+
+    Satisfies the :class:`Synapse` protocol (exposes ``.psc`` and is callable
+    with ``z``) so it can be plugged directly into
+    :class:`~btorch.models.rnn.RecurrentNN`.
+
+    Each channel is an independent :class:`SpikeNetExponentialPSC` with its
+    own delay-weight matrices and time constant.  The composite PSC is the
+    element-wise sum of both channel outputs.
+
+    Args:
+        n_neuron: Number of neurons (pre == post in fully-recurrent networks).
+        exc_weights_by_delay: Excitatory (AMPA) ``{delay_step: [N,N]}`` map.
+        inh_weights_by_delay: Inhibitory (GABA) ``{delay_step: [N,N]}`` map.
+        tau_ampa: AMPA exponential decay time constant (ms). Default: 5.0.
+        tau_gaba: GABA exponential decay time constant (ms). Default: 3.0.
+        use_sparse: Store weight matrices as sparse CSR tensors.
+            Default: False.
+        use_circular_buffer: Use in-place circular history buffer.  Set
+            ``False`` (default) for autograd-compatible training.
+    """
+
+    n_neuron: tuple[int, ...]
+    size: int
+    psc: Tensor
+
+    def __init__(
+        self,
+        n_neuron: int | Sequence[int],
+        exc_weights_by_delay: dict[int, Tensor],
+        inh_weights_by_delay: dict[int, Tensor],
+        tau_ampa: float = 5.0,
+        tau_gaba: float = 3.0,
+        E_ampa: float | None = None,
+        E_gaba: float | None = None,
+        use_sparse: bool = False,
+        use_circular_buffer: bool = False,
+    ) -> None:
+        super().__init__()
+        self.n_neuron, self.size = normalize_n_neuron(n_neuron)
+        self.E_ampa = E_ampa
+        self.E_gaba = E_gaba
+
+        self.ampa = SpikeNetExponentialPSC(
+            n_neuron=n_neuron,
+            weights_by_delay=exc_weights_by_delay,
+            tau_syn=tau_ampa,
+            E_rev=E_ampa,
+            use_sparse=use_sparse,
+            use_circular_buffer=use_circular_buffer,
+        )
+        self.gaba = SpikeNetExponentialPSC(
+            n_neuron=n_neuron,
+            weights_by_delay=inh_weights_by_delay,
+            tau_syn=tau_gaba,
+            E_rev=E_gaba,
+            use_sparse=use_sparse,
+            use_circular_buffer=use_circular_buffer,
+        )
+        self.register_memory("psc", 0.0, self.n_neuron)
+
+    # ------------------------------------------------------------------
+    # State management
+    # ------------------------------------------------------------------
+
+    def init_state(
+        self,
+        batch_size=None,
+        dtype=None,
+        device=None,
+        persistent=True,
+        skip_mem_name: Iterable[str] = (),
+    ) -> None:
+        super().init_state(batch_size, dtype, device, persistent, skip_mem_name)
+        self.ampa.init_state(batch_size, dtype, device, persistent)
+        self.gaba.init_state(batch_size, dtype, device, persistent)
+
+    def reset(
+        self,
+        batch_size=None,
+        dtype=None,
+        device=None,
+        skip_mem_name: Iterable[str] = (),
+    ) -> None:
+        super().reset(batch_size, dtype, device, skip_mem_name)
+        self.ampa.reset(batch_size, dtype, device)
+        self.gaba.reset(batch_size, dtype, device)
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+
+    def forward(self, z: Tensor) -> Tensor:
+        """Update both channels with spike tensor z and return summed PSC.
+
+        When E_ampa/E_gaba were provided, self.psc stores total conductance (µS).
+        Use current(v) to obtain the voltage-dependent current (nA).
+        """
+        self.psc = self.ampa(z) + self.gaba(z)
+        return self.psc
+
+    def current(self, v: Tensor) -> Tensor:
+        """Conductance-based synaptic current (nA) given membrane voltage v (mV).
+
+        I = gs_ampa*(E_ampa - v) + gs_gaba*(E_gaba - v)
+
+        Requires E_ampa and E_gaba to have been set at construction.
+        """
+        if self.E_ampa is None or self.E_gaba is None:
+            raise ValueError(
+                "E_ampa and E_gaba must be set to use conductance-based current."
+            )
+        return self.ampa.current(v) + self.gaba.current(v)
+
+    def extra_repr(self) -> str:
+        return f"n_neuron={self.n_neuron}"
 
 
 class BilinearMixingSynapse(MemoryModule):
