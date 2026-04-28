@@ -709,6 +709,164 @@ class SpikeNetCompositePSC(MemoryModule):
         return f"n_neuron={self.n_neuron}"
 
 
+class ChemSynModel0Gate(MemoryModule):
+    """Pre-synaptic transmitter gating following the SpikeNet ChemSyn model-0.
+
+    Each neuron ``i`` maintains two state variables:
+
+    * ``s_pre[i]``    – fraction of transmitter bound, in ``[0, 1]``.
+    * ``trans_left[i]`` – integer steps of active transmitter release remaining.
+
+    Per simulation step (with ``dt`` read from :func:`environ.get`)::
+
+        fired       = (z > 0).int()
+        trans_left += fired * steps_trans          # extend release window
+        active      = trans_left > 0
+        release     = active * k_trans * (1 - s_pre)
+        s_pre       = where(active,
+                            s_pre + k_trans * (1 - s_pre),
+                            s_pre) * s_pre_decay
+        trans_left  = clamp(trans_left - active, min=0)
+
+    At high sustained firing rates the gating variable ``s_pre → 1``, so
+    ``release → 0``.  This natural saturation is absent from the simpler
+    :class:`SpikeNetExponentialPSC`.
+
+    ``forward(z) -> release`` returns a float32 tensor of the same shape as
+    ``z`` that should be passed to a :class:`SpikeNetExponentialPSC` channel
+    in place of the raw spike tensor.
+
+    Encapsulates two common SpikeNet migration bugs:
+
+    * **Bug 1** – the saturation gating logic itself (absent from the default
+      :class:`SpikeNetExponentialPSC`).
+    * **Bug 3** – E/I neurons require *different* ``steps_trans`` durations.
+      Use :meth:`from_ei_populations` to build the correct per-neuron tensor
+      automatically.
+
+    Args:
+        n_neuron: Total number of neurons (pre-synaptic population).
+        steps_trans: Int32 tensor of shape ``(n_neuron,)`` giving the release
+            window length (in simulation steps) per neuron.
+        tau_syn: Synaptic decay time constant (ms) used to compute
+            ``s_pre_decay = exp(-dt / tau_syn)`` each step.
+    """
+
+    def __init__(
+        self,
+        n_neuron: int,
+        steps_trans: Tensor,
+        tau_syn: float,
+    ) -> None:
+        super().__init__()
+        self.n_neuron = int(n_neuron)
+        self.tau_syn = float(tau_syn)
+
+        steps_trans = torch.as_tensor(steps_trans, dtype=torch.int32)
+        assert steps_trans.shape == (self.n_neuron,), (
+            f"steps_trans must have shape ({self.n_neuron},), got {steps_trans.shape}"
+        )
+        # k_trans = 1 / steps_trans  (float, per-neuron)
+        k_trans = 1.0 / steps_trans.float().clamp(min=1)
+        self.register_buffer("steps_trans", steps_trans, persistent=False)
+        self.register_buffer("k_trans", k_trans, persistent=False)
+
+        # Mutable state: s_pre (float32) and trans_left (int32)
+        self.register_memory("s_pre", 0.0, (self.n_neuron,))
+        self.register_memory("trans_left", 0, (self.n_neuron,), dtype=torch.int32)
+
+    # ------------------------------------------------------------------
+    # Convenience constructor (Bug 3 encapsulation)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_ei_populations(
+        cls,
+        n_e: int,
+        n_i: int,
+        Dt_trans_ampa: float,
+        Dt_trans_gaba: float,
+        tau_syn: float,
+        dt: float,
+    ) -> "ChemSynModel0Gate":
+        """Build a gate for an E/I network with distinct release durations.
+
+        Converts the SpikeNet ``Dt_trans`` parameters (ms) to integer step
+        counts for the E and I sub-populations separately, then concatenates
+        them into a single per-neuron ``steps_trans`` tensor.
+
+        Args:
+            n_e: Number of excitatory neurons.
+            n_i: Number of inhibitory neurons.
+            Dt_trans_ampa: AMPA transmitter release duration (ms) for E neurons.
+            Dt_trans_gaba: GABA transmitter release duration (ms) for I neurons.
+            tau_syn: Synaptic decay time constant (ms).
+            dt: Simulation time step (ms).
+
+        Returns:
+            A :class:`ChemSynModel0Gate` instance with per-neuron steps_trans
+            set to ``round(Dt_trans_ampa / dt)`` for E neurons and
+            ``round(Dt_trans_gaba / dt)`` for I neurons.
+        """
+        steps_e = max(1, round(Dt_trans_ampa / dt))
+        steps_i = max(1, round(Dt_trans_gaba / dt))
+        steps_trans = torch.cat([
+            torch.full((n_e,), steps_e, dtype=torch.int32),
+            torch.full((n_i,), steps_i, dtype=torch.int32),
+        ])
+        return cls(n_neuron=n_e + n_i, steps_trans=steps_trans, tau_syn=tau_syn)
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+
+    def forward(self, z: Tensor) -> Tensor:
+        """Compute transmitter release given spike tensor z.
+
+        Args:
+            z: Binary spike tensor of shape ``(*batch, n_neuron)`` or
+               ``(n_neuron,)``.
+
+        Returns:
+            ``release`` – float32 tensor of same shape as ``z``, in ``[0, 1]``.
+               Pass this to :meth:`SpikeNetExponentialPSC.adaptation_charge`
+               instead of the raw spike tensor.
+        """
+        dt = float(environ.get("dt"))
+        s_pre_decay = math.exp(-dt / max(self.tau_syn, 1e-9))
+
+        fired = (z > 0).to(torch.int32)
+
+        # Extend release window.  trans_left is (n_neuron,); fired may have
+        # leading batch dims — reduce to per-neuron counts for the counter.
+        if fired.dim() > 1:
+            fired_flat = (fired.sum(dim=tuple(range(fired.dim() - 1))) > 0).to(torch.int32)
+        else:
+            fired_flat = fired
+
+        self.trans_left = self.trans_left + fired_flat * self.steps_trans
+        active = (self.trans_left > 0).float()
+
+        release = active * self.k_trans * (1.0 - self.s_pre)
+        self.s_pre = torch.where(
+            active.bool(),
+            self.s_pre + self.k_trans * (1.0 - self.s_pre),
+            self.s_pre,
+        ) * s_pre_decay
+        self.trans_left = (self.trans_left - active.to(torch.int32)).clamp(min=0)
+
+        # Broadcast release back to original z shape (handles batch dims).
+        return release.expand_as(z.float())
+
+    def extra_repr(self) -> str:
+        steps = self.steps_trans
+        return (
+            f"n_neuron={self.n_neuron}, "
+            f"tau_syn={self.tau_syn:.4g} ms, "
+            f"steps_trans=[{int(steps.min())}..{int(steps.max())}]"
+        )
+
+
 class BilinearMixingSynapse(MemoryModule):
     """PSC with bilinear + linear mixing across receptor/input dimensions.
 
